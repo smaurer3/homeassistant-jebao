@@ -370,16 +370,21 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> JebaoOptionsFlow:
-        """Get options flow handler."""
-        return JebaoOptionsFlow(config_entry)
+        """Get options flow handler.
+
+        Don't pass ``config_entry`` — newer HA exposes it as a read-only
+        property auto-populated by the flow manager.
+        """
+        return JebaoOptionsFlow()
 
 
 class JebaoOptionsFlow(config_entries.OptionsFlow):
-    """Handle options flow for Jebao."""
+    """Handle options flow for Jebao.
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+    HA 2024.11+ made ``config_entry`` a read-only property on ``OptionsFlow``
+    and populates it from the flow manager, so subclasses must not assign to
+    it themselves.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

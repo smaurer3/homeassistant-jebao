@@ -233,21 +233,69 @@ class MD44Device:
         """Swallow any unsolicited frames the pump pushes after auth or after
         a control command. The MD-4.4 sends a 0x09 echo and a 0x62 device
         announcement immediately after login, plus a 0x91 push whenever the
-        state changes."""
+        state changes.
+
+        Any 0x91 we encounter while draining is parsed so the cached
+        ``self.state`` stays fresh — we'd rather record the update than
+        discard it.
+        """
         assert self._reader is not None
-        try:
-            while True:
+        while True:
+            try:
                 magic = await asyncio.wait_for(
                     self._reader.readexactly(4), timeout=window
                 )
-                if magic != b"\x00\x00\x00\x03":
-                    raise MD44ConnectionError(
-                        f"Stream lost sync: {magic.hex()}"
-                    )
-                length = await self._read_varint()
-                await self._readexactly(length)
-        except (asyncio.TimeoutError, MD44ConnectionError):
+            except asyncio.TimeoutError:
+                # No more pending frames — we're caught up.
+                return
+            if magic != b"\x00\x00\x00\x03":
+                raise MD44ConnectionError(
+                    f"Stream lost sync: {magic.hex()}"
+                )
+            # Past this point the next bytes are unambiguously part of a
+            # real frame, so any timeout or short-read indicates a genuine
+            # connection problem and should surface to the caller.
+            length = await self._read_varint()
+            body = await self._readexactly(length)
+            self._handle_async_frame(body)
+
+    def _handle_async_frame(self, body: bytes) -> None:
+        """Inspect an unsolicited / out-of-order frame and update state from
+        it if it's something useful. Anything we don't recognise is silently
+        dropped — the pump produces a few opaque message types we don't
+        care about."""
+        if len(body) < 3:
             return
+        cmd = body[2]
+        if cmd == 0x91 and len(body) >= 100:
+            try:
+                self.state = self._parse_status(body)
+            except MD44Error:
+                pass  # malformed; ignore rather than crash
+        # Other types (0x09 echo, 0x62 announce, 0x16 pong, 0x94 ack) — nothing
+        # to do here. We don't log them at this level to keep the noise low.
+
+    async def _read_frame_of_type(
+        self, expected: int, timeout: float
+    ) -> bytes:
+        """Read frames until we get one whose cmd byte matches ``expected``.
+
+        Any interleaved frames are passed to ``_handle_async_frame`` so a
+        0x91 state push that arrives in the middle of a command/response
+        round-trip still updates ``self.state`` and doesn't leave bytes
+        stuck in the socket buffer (which used to desync the next call).
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(
+                    f"Timed out waiting for frame type 0x{expected:02x}"
+                )
+            body = await asyncio.wait_for(self._read_frame(), timeout=remaining)
+            if len(body) >= 3 and body[2] == expected:
+                return body
+            self._handle_async_frame(body)
 
     # ------------------------------------------------------------------ auth
 
@@ -277,7 +325,7 @@ class MD44Device:
             if not self.is_connected:
                 raise MD44ConnectionError("Not connected")
             await self._send(bytes.fromhex("000000030400009002"))
-            body = await asyncio.wait_for(self._read_frame(), timeout=timeout)
+            body = await self._read_frame_of_type(0x91, timeout)
             self.state = self._parse_status(body)
             # Pump often pushes a duplicate frame right after.
             await self._drain_unsolicited(window=0.2)
@@ -376,22 +424,25 @@ class MD44Device:
     # ---------------------------------------------------------------- write
 
     async def _send_control(self, body: bytes) -> None:
-        """Send a 0x93 control frame and wait for the 0x94 ack."""
+        """Send a 0x93 control frame and wait for the 0x94 ack.
+
+        The pump often pushes a 0x91 state update either before or after
+        the 0x94 ack; we read frames until we see the ack, parsing any
+        intervening state frame into ``self.state``. If we don't drain
+        the ack properly here, the leftover bytes desync the next
+        ``update()`` call and the connection has to be torn down.
+        """
         async with self._lock:
             if not self.is_connected:
                 raise MD44ConnectionError("Not connected")
             frame = b"\x00\x00\x00\x03" + _encode_varint(len(body)) + body
             await self._send(frame)
             try:
-                ack = await asyncio.wait_for(self._read_frame(), timeout=DEFAULT_TIMEOUT)
+                await self._read_frame_of_type(0x94, timeout=DEFAULT_TIMEOUT)
             except asyncio.TimeoutError as err:
                 raise MD44Error("No ACK after control command") from err
-            if len(ack) < 3 or ack[2] != 0x94:
-                _LOGGER.warning(
-                    "Control command got unexpected response type 0x%02x",
-                    ack[2] if len(ack) > 2 else 0,
-                )
-            # Pump usually pushes an updated 0x91 right after the ack.
+            # Drain any further 0x91 the pump may push after the ack so
+            # the next call starts from a clean socket buffer.
             await self._drain_unsolicited(window=0.4)
 
     @staticmethod
