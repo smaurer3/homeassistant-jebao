@@ -20,38 +20,60 @@ from .const import (
     CONF_MODEL,
     DEFAULT_NAME,
     DOMAIN,
+    MODEL_MD44,
     MODEL_MDP20000,
 )
+from .md44 import MD44Device, MD44Error
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def validate_connection(hass: HomeAssistant, host: str) -> dict[str, Any]:
-    """Validate we can connect to the device.
+    """Validate we can connect to the device, trying MD-4.4 first then MDP-20000.
+
+    The MD-4.4 doser's status response is far larger than the wavemaker's, so
+    we sniff for it before falling back to the wavemaker handshake.
 
     Returns:
         Dict with device info on success
 
     Raises:
-        JebaoError: Connection or authentication failed
+        JebaoError or MD44Error: Connection or authentication failed
     """
-    device = MDP20000Device(host=host)
+    # Try MD-4.4 first: its varint length + 0x91 response signature lets us
+    # detect a doser reliably.
+    md44 = MD44Device(host=host)
+    try:
+        await md44.connect(timeout=10.0)
+        await md44.update()
+        return {
+            "device_id": md44.device_id or f"md44-{host}",
+            "model": MODEL_MD44,
+            "state": "ok",
+            "mac_address": None,
+            "firmware_version": None,
+        }
+    except MD44Error as md44_err:
+        _LOGGER.debug("Not an MD-4.4 (%s); trying MDP-20000", md44_err)
+    finally:
+        try:
+            await md44.disconnect()
+        except Exception:  # pylint: disable=broad-except
+            pass
 
+    device = MDP20000Device(host=host)
     try:
         await device.connect(timeout=10.0)
         await device.update()
 
-        # Get device info
         info = {
             "device_id": device.device_id or "unknown",
             "model": device.model or MODEL_MDP20000,
             "state": device.state.name if device.state else "unknown",
-            "mac_address": None,  # Not available from direct connection
-            "firmware_version": None,  # Not currently exposed by device
+            "mac_address": None,
+            "firmware_version": None,
         }
-
         return info
-
     finally:
         await device.disconnect()
 
@@ -182,13 +204,13 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._no_devices_reason = "no_devices"
             return await self.async_step_manual()
 
-        # Filter to MDP-20000 devices (MD-4.4 support can be added later)
-        mdp_devices = [d for d in devices if d.is_mdp20000]
+        # Both MDP-20000 wavemakers and MD-4.4 dosers are supported.
+        supported = [d for d in devices if d.is_mdp20000 or d.is_md44]
 
-        if not mdp_devices:
-            _LOGGER.warning("No MDP-20000 devices found")
+        if not supported:
+            _LOGGER.warning("No supported Jebao devices found")
             self._discovery_attempted = True
-            self._no_devices_reason = "no_mdp20000"
+            self._no_devices_reason = "no_supported"
             return await self.async_step_manual()
 
         # Filter out devices already configured in Home Assistant
@@ -196,11 +218,11 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             entry.unique_id
             for entry in self._async_current_entries()
         }
-        new_devices = [d for d in mdp_devices if d.device_id not in configured_ids]
+        new_devices = [d for d in supported if d.device_id not in configured_ids]
         _LOGGER.debug(
-            "Discovery found %d device(s), %d already configured, %d new",
-            len(mdp_devices),
-            len(mdp_devices) - len(new_devices),
+            "Discovery found %d supported device(s), %d already configured, %d new",
+            len(supported),
+            len(supported) - len(new_devices),
             len(new_devices),
         )
 
@@ -278,7 +300,7 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
-            except JebaoError as err:
+            except (JebaoError, MD44Error) as err:
                 _LOGGER.error("Failed to connect to %s: %s", host, err)
                 errors["base"] = "cannot_connect"
             except Exception as err:  # pylint: disable=broad-except
@@ -292,10 +314,10 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 description_placeholders["discovery_result"] = (
                     "⚠️ No Jebao pumps were found during automatic discovery."
                 )
-            elif self._no_devices_reason == "no_mdp20000":
+            elif self._no_devices_reason == "no_supported":
                 description_placeholders["discovery_result"] = (
-                    "⚠️ No MDP-20000 pumps were found during automatic discovery. "
-                    "Other Jebao models may not be supported yet."
+                    "⚠️ Discovery found Jebao devices but none were a supported "
+                    "model (MDP-20000 wavemaker or MD-4.4 doser)."
                 )
             else:
                 description_placeholders["discovery_result"] = (

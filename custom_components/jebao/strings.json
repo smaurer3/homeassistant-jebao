@@ -18,14 +18,14 @@
       },
       "select_device": {
         "title": "Select Device",
-        "description": "Found {device_count} Jebao pump(s) on your network.\n\nSelect a pump to add to Home Assistant. Each pump shows its device ID and IP address.",
+        "description": "Found {device_count} Jebao pump(s) on your network.\n\nSelect a pump to add to Home Assistant. Each pump shows its device ID, model and IP address.",
         "data": {
           "device": "Select pump to add"
         }
       },
       "manual": {
         "title": "Manual Setup",
-        "description": "{discovery_result}\n\nEnter the IP address of your Jebao pump.\n\nThe pump must be powered on and connected to the same network as Home Assistant. Port 12416 must be accessible.\n\nExample: 192.168.1.100",
+        "description": "{discovery_result}\n\nEnter the IP address of your Jebao pump (MDP-20000 wavemaker or MD-4.4 doser).\n\nThe pump must be powered on and connected to the same network as Home Assistant. Port 12416 must be accessible.\n\nExample: 192.168.1.100",
         "data": {
           "host": "IP Address"
         }
@@ -57,31 +57,47 @@
         "name": "Pump"
       }
     },
+    "switch": {
+      "master": { "name": "Master" },
+      "channel_1": { "name": "Channel 1" },
+      "channel_2": { "name": "Channel 2" },
+      "channel_3": { "name": "Channel 3" },
+      "channel_4": { "name": "Channel 4" },
+      "timer_1": { "name": "Timer 1" },
+      "timer_2": { "name": "Timer 2" },
+      "timer_3": { "name": "Timer 3" },
+      "timer_4": { "name": "Timer 4" }
+    },
     "binary_sensor": {
-      "feed_mode": {
-        "name": "Feed mode"
-      }
+      "feed_mode": { "name": "Feed mode" },
+      "open_circuit": { "name": "Open circuit" },
+      "fault_uart": { "name": "UART fault" }
     },
     "button": {
-      "start_feed": {
-        "name": "Start feed"
-      },
-      "cancel_feed": {
-        "name": "Cancel feed"
-      }
+      "start_feed": { "name": "Start feed" },
+      "cancel_feed": { "name": "Cancel feed" }
     },
     "number": {
-      "feed_duration": {
-        "name": "Feed duration"
-      }
+      "feed_duration": { "name": "Feed duration" },
+      "interval_1": { "name": "Channel 1 interval" },
+      "interval_2": { "name": "Channel 2 interval" },
+      "interval_3": { "name": "Channel 3 interval" },
+      "interval_4": { "name": "Channel 4 interval" }
     },
     "sensor": {
-      "speed": {
-        "name": "Speed"
-      },
-      "state": {
-        "name": "State"
-      }
+      "speed": { "name": "Speed" },
+      "state": { "name": "State" },
+      "calibration_channel": { "name": "Calibration channel" },
+      "calib1": { "name": "Calibration value" },
+      "clock": { "name": "Device clock" },
+      "sched_count_1": { "name": "Channel 1 schedules" },
+      "sched_count_2": { "name": "Channel 2 schedules" },
+      "sched_count_3": { "name": "Channel 3 schedules" },
+      "sched_count_4": { "name": "Channel 4 schedules" },
+      "next_sched_1": { "name": "Channel 1 next dose" },
+      "next_sched_2": { "name": "Channel 2 next dose" },
+      "next_sched_3": { "name": "Channel 3 next dose" },
+      "next_sched_4": { "name": "Channel 4 next dose" }
     }
   }
 }

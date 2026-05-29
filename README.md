@@ -13,8 +13,29 @@ Home Assistant custom integration for Jebao aquarium pumps with local network co
 
 ## Supported Models
 
-- **Jebao MDP-20000** - Variable-speed circulation pump
-- **Jebao MD-4.4** - 4-channel dosing pump (planned)
+- **Jebao MDP-20000** — variable-speed circulation pump (full control)
+- **Jebao MD-4.4** — 4-channel dosing pump (read + on/off control; see below)
+
+### MD-4.4 entities
+
+When an MD-4.4 doser is added the integration exposes:
+
+- **Switches**: master power, one ON/OFF per channel (1–4), one timer-enable
+  per channel (controls whether the pump runs its stored schedule)
+- **Sensors**: per-channel programmed-schedule count, per-channel next-dose
+  preview, currently-armed calibration channel, calibration value, the pump's
+  own real-time clock
+- **Binary sensors**: open-circuit alert, MCU↔WiFi UART fault
+- **Numbers**: per-channel "interval in days" (currently read-only — see
+  Limitations below)
+
+### MD-4.4 limitations
+
+The bit-level write protocol (master / channels / timer enables) is fully
+working. Byte-level writes — setting interval days, editing the stored
+schedule, writing the pump's clock, calibration — are not yet implemented
+because the firmware's write format for those fields hasn't been reverse-
+engineered end-to-end. Those entities are exposed as read-only sensors.
 
 ## Installation
 

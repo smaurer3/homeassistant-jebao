@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_DEVICE_ID, CONF_MODEL, DOMAIN
+from .const import DOMAIN, MODEL_MD44
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 
@@ -24,6 +24,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up Jebao buttons from config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
+    if data["model"] == MODEL_MD44:
+        # No buttons defined for the MD-4.4 yet — calibration / time-sync
+        # buttons are gated on the byte-level write protocol which isn't
+        # shipped in this version.
+        return
+
     device = data["device"]
     device_id = data["device_id"]
     model = data["model"]
@@ -31,7 +37,6 @@ async def async_setup_entry(
     mac_address = data.get("mac_address")
     firmware_version = data.get("firmware_version")
 
-    # Get or create coordinator
     if "coordinator" not in data:
         scan_interval = entry.options.get("scan_interval")
         if scan_interval:
@@ -43,7 +48,6 @@ async def async_setup_entry(
     else:
         coordinator = data["coordinator"]
 
-    # Create buttons
     async_add_entities(
         [
             JebaoStartFeedButton(coordinator, device_id, model, host, device, mac_address, firmware_version),
@@ -77,8 +81,6 @@ class JebaoStartFeedButton(JebaoEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Handle button press."""
         try:
-            # Get feed duration from number entity if available
-            # Otherwise use default from device
             await self._device.start_feed()
             await self.coordinator.async_request_refresh()
             _LOGGER.info("Feed mode started")

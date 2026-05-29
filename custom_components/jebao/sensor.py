@@ -1,15 +1,16 @@
 """Sensor platform for Jebao."""
 from __future__ import annotations
 
+import datetime as dt
 import logging
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_DEVICE_ID, CONF_MODEL, DOMAIN
+from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 
@@ -30,7 +31,6 @@ async def async_setup_entry(
     mac_address = data.get("mac_address")
     firmware_version = data.get("firmware_version")
 
-    # Get or create coordinator
     if "coordinator" not in data:
         scan_interval = entry.options.get("scan_interval")
         if scan_interval:
@@ -42,17 +42,31 @@ async def async_setup_entry(
     else:
         coordinator = data["coordinator"]
 
-    # Create sensors
-    async_add_entities(
-        [
-            JebaoSpeedSensor(coordinator, device_id, model, host, mac_address, firmware_version),
-            JebaoStateSensor(coordinator, device_id, model, host, mac_address, firmware_version),
+    if model == MODEL_MD44:
+        entities: list[SensorEntity] = [
+            MD44CalibrationChannelSensor(coordinator, device_id, model, host, mac_address, firmware_version),
+            MD44Calib1Sensor(coordinator, device_id, model, host, mac_address, firmware_version),
+            MD44ClockSensor(coordinator, device_id, model, host, mac_address, firmware_version),
         ]
-    )
+        for idx in range(MD44_CHANNEL_COUNT):
+            entities.append(
+                MD44ScheduleCountSensor(coordinator, device_id, model, host, idx, mac_address, firmware_version)
+            )
+            entities.append(
+                MD44NextScheduleSensor(coordinator, device_id, model, host, idx, mac_address, firmware_version)
+            )
+        async_add_entities(entities)
+    else:
+        async_add_entities(
+            [
+                JebaoSpeedSensor(coordinator, device_id, model, host, mac_address, firmware_version),
+                JebaoStateSensor(coordinator, device_id, model, host, mac_address, firmware_version),
+            ]
+        )
 
 
 class JebaoSpeedSensor(JebaoEntity, SensorEntity):
-    """Sensor for current pump speed."""
+    """Sensor for current pump speed (MDP-20000)."""
 
     _attr_translation_key = "speed"
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -75,12 +89,11 @@ class JebaoSpeedSensor(JebaoEntity, SensorEntity):
 
     @property
     def native_value(self) -> int | None:
-        """Return the current speed."""
         return self.coordinator.data.get("speed")
 
 
 class JebaoStateSensor(JebaoEntity, SensorEntity):
-    """Sensor for device state."""
+    """Sensor for device state (MDP-20000)."""
 
     _attr_translation_key = "state"
 
@@ -101,11 +114,130 @@ class JebaoStateSensor(JebaoEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """Return the current state."""
-        from jebao import DeviceState
+        from jebao import DeviceState  # noqa: F401  (kept for typing parity)
 
         state = self.coordinator.data.get("state")
         if state is None:
             return None
+        if hasattr(state, "name"):
+            return state.name
+        return None
 
-        return state.name
+
+# ---------- MD-4.4 sensors ----------
+
+
+class MD44CalibrationChannelSensor(JebaoEntity, SensorEntity):
+    """Which channel is currently armed for calibration (1..4)."""
+
+    _attr_translation_key = "calibration_channel"
+    _attr_icon = "mdi:tune-variant"
+
+    def __init__(self, coordinator, device_id, model, host, mac_address=None, firmware_version=None) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._attr_unique_id = f"{device_id}_cal_channel"
+        self._attr_name = "Calibration channel"
+
+    @property
+    def native_value(self) -> int | None:
+        state = self.coordinator.data.get("state")
+        if state is None:
+            return None
+        return state.cal_set + 1
+
+
+class MD44Calib1Sensor(JebaoEntity, SensorEntity):
+    """The currently-stored calibration value (10..100)."""
+
+    _attr_translation_key = "calib1"
+    _attr_icon = "mdi:cup-water"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator, device_id, model, host, mac_address=None, firmware_version=None) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._attr_unique_id = f"{device_id}_calib1"
+        self._attr_name = "Calibration value"
+
+    @property
+    def native_value(self) -> int | None:
+        state = self.coordinator.data.get("state")
+        if state is None:
+            return None
+        return state.calib1
+
+
+class MD44ClockSensor(JebaoEntity, SensorEntity):
+    """The clock the pump's MCU currently believes is "now"."""
+
+    _attr_translation_key = "clock"
+    _attr_icon = "mdi:clock-outline"
+
+    def __init__(self, coordinator, device_id, model, host, mac_address=None, firmware_version=None) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._attr_unique_id = f"{device_id}_clock"
+        self._attr_name = "Device clock"
+
+    @property
+    def native_value(self) -> str | None:
+        state = self.coordinator.data.get("state")
+        if state is None or len(state.ymd) < 4 or len(state.hms) < 4:
+            return None
+        if state.ymd == b"\x00\x00\x00\x00":
+            return "unset"
+        try:
+            year = 2000 + state.ymd[0]
+            return (
+                f"{year:04d}-{state.ymd[1]:02d}-{state.ymd[2]:02d} "
+                f"{state.hms[0]:02d}:{state.hms[1]:02d}:{state.hms[2]:02d}"
+            )
+        except (ValueError, IndexError):
+            return None
+
+
+class MD44ScheduleCountSensor(JebaoEntity, SensorEntity):
+    """Number of programmed schedule entries on one channel."""
+
+    _attr_icon = "mdi:calendar-clock"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator, device_id, model, host, idx, mac_address=None, firmware_version=None) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._idx = idx
+        ch = idx + 1
+        self._attr_unique_id = f"{device_id}_sched_count_{ch}"
+        self._attr_name = f"Channel {ch} schedules"
+        self._attr_translation_key = f"sched_count_{ch}"
+
+    @property
+    def native_value(self) -> int | None:
+        state = self.coordinator.data.get("state")
+        if state is None:
+            return None
+        return len(state.schedules[self._idx])
+
+
+class MD44NextScheduleSensor(JebaoEntity, SensorEntity):
+    """The next-up schedule entry for one channel, as HH:MM (Qmg)."""
+
+    _attr_icon = "mdi:clock-time-four-outline"
+
+    def __init__(self, coordinator, device_id, model, host, idx, mac_address=None, firmware_version=None) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._idx = idx
+        ch = idx + 1
+        self._attr_unique_id = f"{device_id}_next_sched_{ch}"
+        self._attr_name = f"Channel {ch} next dose"
+        self._attr_translation_key = f"next_sched_{ch}"
+
+    @property
+    def native_value(self) -> str | None:
+        state = self.coordinator.data.get("state")
+        if state is None:
+            return None
+        entries = state.schedules[self._idx]
+        if not entries:
+            return None
+        now = dt.datetime.now().time()
+        upcoming = [e for e in entries if (e.hour, e.minute) >= (now.hour, now.minute)]
+        nxt = upcoming[0] if upcoming else entries[0]
+        return f"{nxt.hour:02d}:{nxt.minute:02d} ({nxt.quantity_ml:g} mL)"

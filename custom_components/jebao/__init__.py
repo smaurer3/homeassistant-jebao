@@ -12,15 +12,19 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import DOMAIN
+from .const import DOMAIN, MODEL_MD44, MODEL_MDP20000
+from .md44 import MD44Device, MD44Error
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
 
 _LOGGER = logging.getLogger(__name__)
 
+# Platforms used by either pump model. Each platform decides per-entry whether
+# it has anything to add based on the configured model.
 PLATFORMS: list[Platform] = [
     Platform.FAN,
+    Platform.SWITCH,
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     Platform.NUMBER,
@@ -28,32 +32,40 @@ PLATFORMS: list[Platform] = [
 ]
 
 
+def _is_md44(model: str | None) -> bool:
+    return model == MODEL_MD44
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Jebao from a config entry."""
     host = entry.data[CONF_HOST]
     device_id = entry.data.get("device_id")
-    model = entry.data.get("model", "MDP-20000")
+    model = entry.data.get("model", MODEL_MDP20000)
     mac_address = entry.data.get("mac_address")
     firmware_version = entry.data.get("firmware_version")
 
-    _LOGGER.info("Setting up Jebao device at %s", host)
+    _LOGGER.info("Setting up Jebao %s at %s", model, host)
 
-    # Create device instance
-    device = MDP20000Device(host=host, device_id=device_id)
+    if _is_md44(model):
+        device = MD44Device(host=host, device_id=device_id)
+        try:
+            await device.connect()
+        except MD44Error as err:
+            _LOGGER.error("Failed to connect to MD-4.4 at %s: %s", host, err)
+            await device.disconnect()
+            raise ConfigEntryNotReady(f"Failed to connect: {err}") from err
+    else:
+        device = MDP20000Device(host=host, device_id=device_id)
+        try:
+            await device.connect()
+            # Ensure manual mode (exit Program mode if active)
+            await device.ensure_manual_mode()
+        except JebaoError as err:
+            _LOGGER.error("Failed to connect to Jebao device at %s: %s", host, err)
+            await device.disconnect()
+            raise ConfigEntryNotReady(f"Failed to connect: {err}") from err
 
-    try:
-        # Connect to device
-        await device.connect()
-
-        # Ensure manual mode (exit Program mode if active)
-        await device.ensure_manual_mode()
-
-        _LOGGER.info("Successfully connected to Jebao device at %s", host)
-
-    except JebaoError as err:
-        _LOGGER.error("Failed to connect to Jebao device at %s: %s", host, err)
-        await device.disconnect()
-        raise ConfigEntryNotReady(f"Failed to connect: {err}") from err
+    _LOGGER.info("Successfully connected to Jebao %s at %s", model, host)
 
     # Store device instance
     hass.data.setdefault(DOMAIN, {})
@@ -78,9 +90,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
-        # Disconnect device
         data = hass.data[DOMAIN].pop(entry.entry_id)
-        device: MDP20000Device = data["device"]
+        device = data["device"]
         await device.disconnect()
         _LOGGER.info("Disconnected from Jebao device at %s", data["host"])
 
@@ -90,7 +101,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 def get_device_info(entry: ConfigEntry) -> DeviceInfo:
     """Get device info for device registry."""
     device_id = entry.data.get("device_id", "unknown")
-    model = entry.data.get("model", "MDP-20000")
+    model = entry.data.get("model", MODEL_MDP20000)
     host = entry.data[CONF_HOST]
 
     return DeviceInfo(

@@ -15,3 +15,6 @@ DEFAULT_SCAN_INTERVAL: Final = 30  # seconds
 # Models
 MODEL_MDP20000: Final = "MDP-20000"
 MODEL_MD44: Final = "MD-4.4"
+
+# Per-model channel count
+MD44_CHANNEL_COUNT: Final = 4

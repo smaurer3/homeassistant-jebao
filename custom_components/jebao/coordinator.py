@@ -10,18 +10,24 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, MODEL_MD44
+from .md44 import MD44Device, MD44Error
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Jebao data."""
+    """Class to manage fetching Jebao data.
+
+    Handles both the MDP-20000 wavemaker and the MD-4.4 4-channel doser. The
+    refresh path branches on the device type so callers can ask for either
+    via ``self.data`` without caring which is plugged in.
+    """
 
     def __init__(
         self,
         hass: HomeAssistant,
-        device: MDP20000Device,
+        device,
         entry: ConfigEntry,
         device_id: str,
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
@@ -39,29 +45,38 @@ class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=scan_interval),
         )
 
+    @property
+    def _is_md44(self) -> bool:
+        return isinstance(self.device, MD44Device)
+
     async def _async_update_data(self) -> dict:
         """Fetch data from device."""
         try:
-            # Check if connection is alive, reconnect if needed
+            # Reconnect if needed
             if not self.device.is_connected:
                 _LOGGER.warning("Connection lost, attempting to reconnect...")
                 try:
                     await self.device.connect(timeout=5.0)
                     _LOGGER.info("Reconnected successfully")
-                    self._discovery_attempted = False  # Reset flag on successful reconnect
-                except JebaoError as err:
+                    self._discovery_attempted = False
+                except (JebaoError, MD44Error) as err:
                     _LOGGER.error("Reconnection failed: %s", err)
 
-                    # Try discovery to find device with new IP
-                    new_ip = await self._try_discovery_recovery()
+                    # MDP-20000 supports rediscovery; MD-4.4 doesn't yet.
+                    new_ip = None
+                    if not self._is_md44:
+                        new_ip = await self._try_discovery_recovery()
+
                     if new_ip:
-                        # Update device with new IP and reconnect
                         await self._reconnect_with_new_ip(new_ip)
                     else:
                         raise UpdateFailed(f"Failed to reconnect: {err}") from err
 
-            await self.device.update()
+            if self._is_md44:
+                state = await self.device.update()
+                return {"state": state}
 
+            await self.device.update()
             return {
                 "state": self.device.state,
                 "speed": self.device.speed,
@@ -70,15 +85,11 @@ class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
                 "is_program_mode": self.device.is_program_mode,
             }
 
-        except JebaoError as err:
+        except (JebaoError, MD44Error) as err:
             raise UpdateFailed(f"Error communicating with device: {err}") from err
 
     async def _try_discovery_recovery(self) -> Optional[str]:
-        """Try to find device via discovery if IP changed.
-
-        Returns:
-            New IP address if found, None otherwise
-        """
+        """Try to find device via discovery if IP changed (MDP-20000 only)."""
         if self._discovery_attempted:
             _LOGGER.debug("Discovery already attempted this cycle, skipping")
             return None
@@ -91,7 +102,6 @@ class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             devices = await discover_devices(timeout=10.0)
 
-            # Find our device by device_id
             for device in devices:
                 if device.device_id == self.device_id:
                     if device.ip_address != current_ip:
@@ -114,27 +124,17 @@ class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
             return None
 
     async def _reconnect_with_new_ip(self, new_ip: str) -> None:
-        """Update config entry and reconnect with new IP.
-
-        Args:
-            new_ip: New IP address for the device
-
-        Raises:
-            JebaoError: If reconnection fails
-        """
+        """Update config entry and reconnect with new IP."""
         current_ip = self.entry.data[CONF_HOST]
 
-        # Update config entry with new IP
         _LOGGER.info("Updating config entry IP from %s to %s", current_ip, new_ip)
         new_data = dict(self.entry.data)
         new_data[CONF_HOST] = new_ip
         self.hass.config_entries.async_update_entry(self.entry, data=new_data)
 
-        # Update device instance with new IP
         self.device.host = new_ip
 
-        # Reconnect
         await self.device.disconnect()
         await self.device.connect(timeout=5.0)
         _LOGGER.info("Successfully reconnected to device at new IP %s", new_ip)
-        self._discovery_attempted = False  # Reset flag on successful reconnect
+        self._discovery_attempted = False
