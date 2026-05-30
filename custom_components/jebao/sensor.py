@@ -237,7 +237,11 @@ class MD44NextScheduleSensor(JebaoEntity, SensorEntity):
         entries = state.schedules[self._idx]
         if not entries:
             return None
+        # Sort by time-of-day so we always pick the chronologically next one,
+        # not the next one in the order the user added them in the app.
+        sorted_entries = sorted(entries, key=lambda e: (e.hour, e.minute))
         now = dt.datetime.now().time()
-        upcoming = [e for e in entries if (e.hour, e.minute) >= (now.hour, now.minute)]
-        nxt = upcoming[0] if upcoming else entries[0]
-        return f"{nxt.hour:02d}:{nxt.minute:02d} ({nxt.quantity_ml:g} mL)"
+        upcoming = [e for e in sorted_entries if (e.hour, e.minute) >= (now.hour, now.minute)]
+        nxt = upcoming[0] if upcoming else sorted_entries[0]
+        suffix = "" if upcoming else " (tomorrow)"
+        return f"{nxt.hour:02d}:{nxt.minute:02d} ({nxt.quantity_ml:g} mL){suffix}"

@@ -1,0 +1,42 @@
+set_schedule:
+  name: Set MD-4.4 channel schedule
+  description: >
+    Overwrite the stored dosing schedule for one channel of an MD-4.4 doser.
+    Up to 24 entries per channel. Existing entries on the channel are
+    replaced entirely — pass an empty list to clear the channel.
+  fields:
+    device_id:
+      name: Device ID
+      description: >
+        The Gizwits ``did`` (e.g. ``9Y4EeBqQuIfwfqR8XvvrRT``). You can copy
+        it from the device card in Home Assistant.
+      required: true
+      example: 9Y4EeBqQuIfwfqR8XvvrRT
+      selector:
+        text:
+    channel:
+      name: Channel
+      description: Which channel to write (1..4).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 4
+          mode: box
+    entries:
+      name: Schedule entries
+      description: >
+        List of ``{hour, minute, quantity_ml}`` dictionaries. Up to 24 per
+        channel. Times are in the pump's local clock — sync it first with
+        the "Sync clock" button if you've never set it.
+      required: true
+      example: |
+        - hour: 12
+          minute: 0
+          quantity_ml: 3
+        - hour: 18
+          minute: 30
+          quantity_ml: 2
+      selector:
+        object:

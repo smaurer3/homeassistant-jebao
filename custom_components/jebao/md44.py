@@ -52,12 +52,11 @@ class MD44ConnectionError(MD44Error):
 class ScheduleEntry:
     hour: int
     minute: int
-    quantity: int  # raw 16-bit value the firmware stores
+    quantity: int  # mL — whole-mL units, max ~255 per dose
 
     @property
     def quantity_ml(self) -> float:
-        # The firmware stores dosing volume in 0.1 mL increments.
-        return self.quantity / 10.0
+        return float(self.quantity)
 
 
 @dataclass
@@ -103,9 +102,13 @@ class MD44State:
 def _parse_schedule_blob(hex_blob: str) -> List[ScheduleEntry]:
     """Parse a CH*SWTime hex string into structured entries.
 
-    Layout: 96 bytes (192 hex chars). Byte 0 is reserved; bytes 1..96 hold
-    up to 24 entries of 4 bytes each: hour, minute, quantity_hi, quantity_lo.
-    All-zero entries are skipped.
+    Layout: 96 bytes (192 hex chars), 24 entries of 4 bytes each:
+      [hour, minute, reserved, quantity_mL]
+
+    Verified against the Jebao Aqua app by setting a known schedule
+    (CH1 = 3 mL @ 12:00) and reading it back as 0c 00 00 03 in
+    ``CH1SWTime`` byte 0..3. Entries start at byte 0, not byte 1 as
+    older notes implied. All-zero entries are skipped.
     """
     if not hex_blob:
         return []
@@ -115,11 +118,10 @@ def _parse_schedule_blob(hex_blob: str) -> List[ScheduleEntry]:
         return []
     out: List[ScheduleEntry] = []
     for i in range(SCHEDULES_PER_CHANNEL):
-        base = 1 + i * SCHEDULE_ENTRY_LEN
+        base = i * SCHEDULE_ENTRY_LEN
         if base + SCHEDULE_ENTRY_LEN > len(blob):
             break
-        hour, minute, qhi, qlo = blob[base : base + SCHEDULE_ENTRY_LEN]
-        quantity = (qhi << 8) | qlo
+        hour, minute, _reserved, quantity = blob[base : base + SCHEDULE_ENTRY_LEN]
         if hour == 0 and minute == 0 and quantity == 0:
             continue
         out.append(ScheduleEntry(hour=hour, minute=minute, quantity=quantity))
@@ -244,6 +246,31 @@ class MD44Device:
             raise ValueError(f"interval days out of range: {days}")
         _LOGGER.info("MD-4.4: IntervalT%d -> %d days", idx + 1, days)
         await self._write({f"IntervalT{idx + 1}": int(days)})
+
+    async def set_schedule(
+        self, channel_idx: int, entries: List[ScheduleEntry]
+    ) -> None:
+        """Overwrite one channel's CH*SWTime blob with the given entries.
+
+        Entries are written in order starting at byte 0; remaining slots up
+        to 24 are zeroed. Quantity is clamped to 0..255 mL.
+        """
+        if not 0 <= channel_idx < MD44_CHANNEL_COUNT:
+            raise ValueError(f"channel idx out of range: {channel_idx}")
+        if len(entries) > SCHEDULES_PER_CHANNEL:
+            raise ValueError(
+                f"max {SCHEDULES_PER_CHANNEL} schedule entries per channel"
+            )
+        blob = bytearray(SCHEDULE_BLOB_LEN)
+        for i, e in enumerate(entries):
+            base = i * SCHEDULE_ENTRY_LEN
+            blob[base] = e.hour & 0xFF
+            blob[base + 1] = e.minute & 0xFF
+            blob[base + 2] = 0
+            blob[base + 3] = max(0, min(255, int(e.quantity)))
+        attr = f"CH{channel_idx + 1}SWTime"
+        _LOGGER.info("MD-4.4: writing %d schedule entries to %s", len(entries), attr)
+        await self._write({attr: bytes(blob).hex()})
 
     async def sync_time(self, now: Optional[dt.datetime] = None) -> None:
         """Write the pump's clock to the local wall-clock time."""

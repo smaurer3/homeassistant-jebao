@@ -107,19 +107,18 @@ class JebaoFeedDurationNumber(JebaoEntity, NumberEntity):
 
 
 class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
-    """Per-channel "interval in days" between scheduled doses.
+    """Per-channel "days to skip" between scheduled doses.
 
-    The pump stores one byte per channel (IntervalT1..IntervalT4). The value
-    is the gap between schedule firings in days; the firmware caps it at 30.
-    This entity reports the stored value. Setting it requires the byte-level
-    write protocol which isn't shipped yet; the value field is disabled for
-    now so HA shows the reading without offering a slider that would no-op.
+    0 = dose every day (no skipping), 1 = every second day, 2 = every third
+    day, and so on. The official app accepts values up to at least 184,
+    so we deliberately don't tighten the range below the firmware's uint8
+    limit. Stored as ``IntervalT1``..``IntervalT4`` in the cloud.
     """
 
     _attr_native_unit_of_measurement = UnitOfTime.DAYS
     _attr_mode = NumberMode.BOX
     _attr_native_min_value = 0
-    _attr_native_max_value = 30
+    _attr_native_max_value = 255
     _attr_native_step = 1
     _attr_icon = "mdi:calendar-range"
 

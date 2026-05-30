@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import voluptuous as vol
 from jebao import JebaoError, MDP20000Device
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 
@@ -22,7 +24,7 @@ from .const import (
     MODEL_MD44,
     MODEL_MDP20000,
 )
-from .md44 import MD44Device, MD44Error
+from .md44 import MD44Device, MD44Error, ScheduleEntry
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
@@ -96,7 +98,62 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Register the doser-specific schedule service. It's a no-op for the
+    # wavemaker but harmless to register once globally.
+    if _is_md44(model):
+        await _async_register_md44_services(hass)
+
     return True
+
+
+_SET_SCHEDULE_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Required("channel"): vol.All(int, vol.Range(min=1, max=4)),
+        vol.Required("entries"): vol.All(
+            cv.ensure_list,
+            [
+                vol.Schema(
+                    {
+                        vol.Required("hour"): vol.All(int, vol.Range(min=0, max=23)),
+                        vol.Required("minute"): vol.All(int, vol.Range(min=0, max=59)),
+                        vol.Required("quantity_ml"): vol.All(int, vol.Range(min=0, max=255)),
+                    }
+                )
+            ],
+        ),
+    }
+)
+
+
+async def _async_register_md44_services(hass: HomeAssistant) -> None:
+    if hass.services.has_service(DOMAIN, "set_schedule"):
+        return
+
+    async def _handle_set_schedule(call: ServiceCall) -> None:
+        target_id = call.data["device_id"]
+        channel = int(call.data["channel"])
+        entries = [
+            ScheduleEntry(hour=e["hour"], minute=e["minute"], quantity=e["quantity_ml"])
+            for e in call.data["entries"]
+        ]
+        # Find the matching MD44Device by device_id (matches the unique_id we
+        # set during config flow).
+        for stored in hass.data.get(DOMAIN, {}).values():
+            if stored.get("device_id") == target_id and isinstance(
+                stored.get("device"), MD44Device
+            ):
+                device: MD44Device = stored["device"]
+                await device.set_schedule(channel - 1, entries)
+                return
+        _LOGGER.error("set_schedule: no MD-4.4 found with device_id %s", target_id)
+
+    hass.services.async_register(
+        DOMAIN,
+        "set_schedule",
+        _handle_set_schedule,
+        schema=_SET_SCHEDULE_SCHEMA,
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
