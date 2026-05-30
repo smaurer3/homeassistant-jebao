@@ -222,16 +222,14 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
     _attr_translation_key = "dose_input"
     _attr_icon = "mdi:beaker-question-outline"
     _attr_native_min_value = 0.0
-    # Both the pump's per-dose schedule slot AND the Jebao app's calibration
-    # field are 1 byte (0..255). With the 10x precision toggle on, that caps
-    # the real-world value the app will accept at 25.5 mL, so we cap the
-    # calculator at the same number — anything higher would compute a value
-    # the app refuses anyway.
-    _attr_native_max_value = 25.5
     _attr_native_step = 0.1
     _attr_native_unit_of_measurement = "mL"
     _attr_mode = NumberMode.BOX
     _attr_entity_category = EntityCategory.CONFIG
+    # ``native_max_value`` is dynamic — see the property below. The Jebao
+    # app's calibration field caps at 100 mL, so with the 10x precision
+    # toggle off the user can type up to 100, and with it on the real-mL
+    # max is 100 / 10 = 10 (so the computed app value stays ≤ 100).
 
     def __init__(
         self,
@@ -259,10 +257,46 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
                 self._value = float(last_state.state)
             except ValueError:
                 pass
+        # Clamp anything restored from before the dynamic max went in.
+        max_now = self.native_max_value
+        if self._value > max_now:
+            self._value = max_now
         # Publish the current value + tell the paired sensor to render. The
         # sensor subscribes to the same signal so changes propagate without
         # waiting for the coordinator's next poll cycle.
         self._publish(emit_signal=True)
+        # Re-render and reclamp when the 10x precision toggle flips so the
+        # input's upper bound updates immediately.
+        from homeassistant.helpers.dispatcher import async_dispatcher_connect
+        from .const import signal_cal_factor_changed
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_cal_factor_changed(self._entry.entry_id),
+                self._on_factor_changed,
+            )
+        )
+
+    @property
+    def native_max_value(self) -> float:
+        # Cap at what the Jebao app's calibration field actually accepts.
+        # With 10x precision off the user enters whole mL (max 100). With
+        # it on we multiply by 10 before showing in the paired sensor,
+        # so the real-mL max is 100 / 10 = 10 to keep the computed app
+        # value inside the app's accepted range.
+        from .const import cal_factor as _cf
+        factor = _cf(self._entry.options)
+        return 100.0 / factor
+
+    def _on_factor_changed(self) -> None:
+        """Clamp the stored value to the new bound (it drops from 100 to
+        10 mL when 10x precision turns on) and rerender so the input's
+        upper limit visibly updates."""
+        max_now = self.native_max_value
+        if self._value > max_now:
+            self._value = max_now
+            self._publish(emit_signal=True)
+        self.async_write_ha_state()
 
     def _publish(self, *, emit_signal: bool) -> None:
         bucket = self.hass.data.setdefault(DOMAIN, {}).setdefault(
