@@ -1,0 +1,194 @@
+"""Text platform for Jebao MD-4.4 — schedule editor.
+
+One ``text`` entity per channel exposes that channel's full schedule as
+a single editable string. Users can change the schedule from the regular
+HA UI (Developer Tools → Entity → set value, or click the entity in the
+device card) without having to call a service.
+
+Format: ``HH:MM=mL, HH:MM=mL, ...`` (max 24 entries). Whitespace is
+flexible. Empty string clears the channel. Examples::
+
+    12:00=3                     -> one daily 3 mL dose at noon
+    09:00=2, 21:00=2            -> two doses (morning + evening)
+                                -> (empty)  clears all 24 slots
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from typing import Optional
+
+from homeassistant.components.text import TextEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
+from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44
+from .coordinator import JebaoDataUpdateCoordinator
+from .entity import JebaoEntity
+from .md44 import MD44Device, MD44Error, ScheduleEntry
+
+_LOGGER = logging.getLogger(__name__)
+
+_ENTRY_RE = re.compile(r"\s*(\d{1,2})\s*:\s*(\d{1,2})\s*=\s*(\d{1,3})\s*")
+
+
+def parse_schedule_text(text: str) -> list[ScheduleEntry]:
+    """Parse ``HH:MM=mL[, HH:MM=mL ...]`` into ScheduleEntry list.
+
+    Raises ``ValueError`` on bad format / out-of-range values.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    entries: list[ScheduleEntry] = []
+    for piece in text.split(","):
+        if not piece.strip():
+            continue
+        m = _ENTRY_RE.fullmatch(piece)
+        if not m:
+            raise ValueError(
+                f"Bad entry {piece!r}; expected HH:MM=mL (e.g. 12:00=3)"
+            )
+        hour, minute, qty = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if not 0 <= hour <= 23:
+            raise ValueError(f"hour out of range in {piece!r}: {hour}")
+        if not 0 <= minute <= 59:
+            raise ValueError(f"minute out of range in {piece!r}: {minute}")
+        if not 0 <= qty <= 255:
+            raise ValueError(f"quantity out of range in {piece!r}: {qty}")
+        entries.append(ScheduleEntry(hour=hour, minute=minute, quantity=qty))
+    return entries
+
+
+def format_schedule(entries) -> str:
+    if not entries:
+        return ""
+    return ", ".join(
+        f"{e.hour:02d}:{e.minute:02d}={int(e.quantity)}" for e in entries
+    )
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    data = hass.data[DOMAIN][entry.entry_id]
+    if data["model"] != MODEL_MD44:
+        return
+
+    device: MD44Device = data["device"]
+    device_id = data["device_id"]
+    model = data["model"]
+    host = data["host"]
+    mac_address = data.get("mac_address")
+    firmware_version = data.get("firmware_version")
+
+    if "coordinator" not in data:
+        scan_interval = entry.options.get("scan_interval")
+        if scan_interval:
+            coordinator = JebaoDataUpdateCoordinator(hass, device, entry, device_id, scan_interval)
+        else:
+            coordinator = JebaoDataUpdateCoordinator(hass, device, entry, device_id)
+        await coordinator.async_config_entry_first_refresh()
+        data["coordinator"] = coordinator
+    else:
+        coordinator = data["coordinator"]
+
+    entities: list[TextEntity] = []
+    for idx in range(MD44_CHANNEL_COUNT):
+        entities.append(
+            MD44ScheduleText(
+                coordinator, device_id, model, host, device, idx,
+                mac_address, firmware_version,
+            )
+        )
+    async_add_entities(entities)
+
+
+class MD44ScheduleText(JebaoEntity, TextEntity):
+    """One channel's complete dosing schedule as a single editable string."""
+
+    _attr_icon = "mdi:calendar-edit"
+    _attr_mode = "text"
+    # Max length: 24 entries × "HH:MM=NNN, " = 24 * 12 = 288 chars, give some slack
+    _attr_native_max = 400
+
+    def __init__(
+        self,
+        coordinator: JebaoDataUpdateCoordinator,
+        device_id: str,
+        model: str,
+        host: str,
+        device: MD44Device,
+        idx: int,
+        mac_address: str | None = None,
+        firmware_version: str | None = None,
+    ) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._device = device
+        self._idx = idx
+        self._optimistic: Optional[str] = None
+        self._verify_task: Optional[asyncio.Task] = None
+        ch = idx + 1
+        self._attr_unique_id = f"{device_id}_schedule_text_{ch}"
+        self._attr_name = f"Channel {ch} schedule"
+        self._attr_translation_key = f"schedule_{ch}"
+
+    def _coordinator_value(self) -> str:
+        state = self.coordinator.data.get("state")
+        if state is None:
+            return ""
+        return format_schedule(state.schedules[self._idx])
+
+    @property
+    def native_value(self) -> str | None:
+        if self._optimistic is not None:
+            return self._optimistic
+        return self._coordinator_value()
+
+    async def async_set_value(self, value: str) -> None:
+        """Replace the channel's schedule. Empty string clears it."""
+        try:
+            entries = parse_schedule_text(value)
+        except ValueError as err:
+            _LOGGER.error("Channel %d: bad schedule string: %s", self._idx + 1, err)
+            return
+
+        # Cancel any verify in flight from a previous edit.
+        if self._verify_task and not self._verify_task.done():
+            self._verify_task.cancel()
+            self._verify_task = None
+
+        # Reformat so the optimistic view matches what we wrote.
+        target = format_schedule(entries)
+        self._optimistic = target
+        self.async_write_ha_state()
+
+        try:
+            await self._device.set_schedule(self._idx, entries)
+        except MD44Error as err:
+            _LOGGER.error("Channel %d: schedule write failed: %s", self._idx + 1, err)
+            self._optimistic = None
+            self.async_write_ha_state()
+            return
+
+        async def _verify() -> None:
+            try:
+                for delay in (5.0, 4.0, 4.0):
+                    await asyncio.sleep(delay)
+                    try:
+                        await self.coordinator.async_request_refresh()
+                    except Exception:  # pylint: disable=broad-except
+                        continue
+                    if self._coordinator_value() == target:
+                        return
+            except asyncio.CancelledError:
+                return
+            finally:
+                self._optimistic = None
+                self.async_write_ha_state()
+
+        self._verify_task = self.hass.async_create_task(_verify())

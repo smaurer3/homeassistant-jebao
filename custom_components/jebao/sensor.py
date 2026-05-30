@@ -128,11 +128,12 @@ class JebaoStateSensor(JebaoEntity, SensorEntity):
 
 
 class MD44CalibrationChannelSensor(JebaoEntity, SensorEntity):
-    """Which channel is currently armed for calibration.
+    """Which channel is currently armed for calibration (1..4).
 
-    The cloud returns the value as a localized string label such as
-    ``"校准1"`` (Calibration 1) rather than a number, so we just pass it
-    through verbatim and let the user read what the app would show.
+    The cloud returns the value as a localized string like ``"校准1"``
+    (Chinese for "Calibration 1") or sometimes the English equivalent
+    depending on account locale. We extract the trailing digit so the
+    sensor surfaces a clean integer 1..4.
     """
 
     _attr_translation_key = "calibration_channel"
@@ -144,11 +145,13 @@ class MD44CalibrationChannelSensor(JebaoEntity, SensorEntity):
         self._attr_name = "Calibration channel"
 
     @property
-    def native_value(self) -> str | None:
+    def native_value(self) -> int | None:
         state = self.coordinator.data.get("state")
         if state is None or not state.cal_set:
             return None
-        return state.cal_set
+        import re
+        match = re.search(r"(\d+)", state.cal_set)
+        return int(match.group(1)) if match else None
 
 
 class MD44Calib1Sensor(JebaoEntity, SensorEntity):

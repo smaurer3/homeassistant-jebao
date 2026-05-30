@@ -134,9 +134,11 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
         firmware_version: str | None = None,
     ) -> None:
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        import asyncio as _asyncio
         self._device = device
         self._idx = idx
         self._optimistic: float | None = None
+        self._verify_task: _asyncio.Task | None = None
         ch = idx + 1
         self._attr_unique_id = f"{device_id}_interval_{ch}"
         self._attr_name = f"Channel {ch} interval"
@@ -153,6 +155,9 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         import asyncio
+        if self._verify_task and not self._verify_task.done():
+            self._verify_task.cancel()
+            self._verify_task = None
         target = int(value)
         self._optimistic = float(target)
         self.async_write_ha_state()
@@ -168,9 +173,8 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
 
         async def _verify() -> None:
             try:
-                deadline = self.hass.loop.time() + 20.0
-                while self.hass.loop.time() < deadline:
-                    await asyncio.sleep(2.0)
+                for delay in (5.0, 4.0, 4.0):
+                    await asyncio.sleep(delay)
                     try:
                         await self.coordinator.async_request_refresh()
                     except Exception:  # pylint: disable=broad-except
@@ -178,8 +182,10 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
                     state = self.coordinator.data.get("state")
                     if state is not None and state.intervals_days[self._idx] == target:
                         return
+            except asyncio.CancelledError:
+                return
             finally:
                 self._optimistic = None
                 self.async_write_ha_state()
 
-        self.hass.async_create_task(_verify())
+        self._verify_task = self.hass.async_create_task(_verify())

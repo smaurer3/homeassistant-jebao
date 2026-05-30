@@ -26,13 +26,13 @@ from .md44 import MD44Device, MD44Error
 
 _LOGGER = logging.getLogger(__name__)
 
-# Pump -> MQTT -> cloud cache propagation takes 2-5 seconds in practice,
-# sometimes longer. We poll the cloud on a short interval and only release
-# the optimistic pin once the cloud confirms our just-written value; if
-# the cloud never catches up we give up after VERIFY_TIMEOUT seconds so
-# the pin can't get stuck forever.
-VERIFY_POLL_INTERVAL = 2.0
-VERIFY_TIMEOUT = 20.0
+# Pump -> MQTT -> cloud cache propagation usually takes 2-5 seconds. We
+# want to confirm the write without spamming the cloud, so we hold the
+# optimistic pin for a generous initial wait, then refresh and only do a
+# couple of retries before giving up. With the older "poll every 2 s for
+# 20 s" loop, multiple switches toggled in quick succession produced ~1
+# refresh per second between them.
+VERIFY_RETRY_DELAYS = (5.0, 4.0, 4.0)  # total worst case ~13 s + cloud latency
 
 
 async def async_setup_entry(
@@ -99,6 +99,7 @@ class _MD44SwitchBase(JebaoEntity, SwitchEntity):
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
         self._device = device
         self._optimistic: bool | None = None
+        self._verify_task: asyncio.Task | None = None
 
     def _set_optimistic(self, value: bool) -> None:
         """Pin the displayed state to ``value`` until the cloud catches up."""
@@ -123,12 +124,16 @@ class _MD44SwitchBase(JebaoEntity, SwitchEntity):
         """Run the cloud write and hold the optimistic state until the
         cloud's cached value catches up.
 
-        The previous shape (fixed 3-second delay then unconditional clear)
-        leaked the cloud's stale OFF/ON back into the UI when the cloud
-        lagged longer than that. Now we keep polling — short interval,
-        capped total wait — and only release the pin once the coordinator
-        sees the value we wrote.
+        If a write is in flight for this entity (verify task hasn't
+        finished) it's cancelled so we don't pile multiple verify loops
+        on top of each other and storm the cloud with refreshes.
         """
+        # Cancel any verify still running from a previous toggle of the
+        # same switch — otherwise back-to-back clicks stack verify loops.
+        if self._verify_task and not self._verify_task.done():
+            self._verify_task.cancel()
+            self._verify_task = None
+
         self._set_optimistic(target)
         try:
             await write_coro
@@ -138,25 +143,27 @@ class _MD44SwitchBase(JebaoEntity, SwitchEntity):
 
         async def _verify() -> None:
             try:
-                deadline = self.hass.loop.time() + VERIFY_TIMEOUT
-                while self.hass.loop.time() < deadline:
-                    await asyncio.sleep(VERIFY_POLL_INTERVAL)
+                for delay in VERIFY_RETRY_DELAYS:
+                    await asyncio.sleep(delay)
                     try:
                         await self.coordinator.async_request_refresh()
                     except Exception:  # pylint: disable=broad-except
-                        # Don't abandon the pin just because one refresh failed.
+                        # One failed refresh shouldn't abandon the pin.
                         continue
                     if self._coordinator_value() == target:
                         return
                 _LOGGER.debug(
-                    "Verify timed out after %.0fs; cloud still doesn't reflect "
+                    "Verify gave up after %.0fs; cloud still doesn't reflect "
                     "the write. Releasing optimistic pin.",
-                    VERIFY_TIMEOUT,
+                    sum(VERIFY_RETRY_DELAYS),
                 )
+            except asyncio.CancelledError:
+                # A newer write took over — let it own the pin.
+                return
             finally:
                 self._clear_optimistic()
 
-        self.hass.async_create_task(_verify())
+        self._verify_task = self.hass.async_create_task(_verify())
 
 
 class MD44MasterSwitch(_MD44SwitchBase):

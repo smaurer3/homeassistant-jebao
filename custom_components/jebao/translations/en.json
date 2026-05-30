@@ -122,6 +122,12 @@
       "interval_7": { "name": "Channel 7 interval" },
       "interval_8": { "name": "Channel 8 interval" }
     },
+    "text": {
+      "schedule_1": { "name": "Channel 1 schedule" },
+      "schedule_2": { "name": "Channel 2 schedule" },
+      "schedule_3": { "name": "Channel 3 schedule" },
+      "schedule_4": { "name": "Channel 4 schedule" }
+    },
     "sensor": {
       "speed": { "name": "Speed" },
       "state": { "name": "State" },
