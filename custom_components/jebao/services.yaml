@@ -8,14 +8,12 @@ set_schedule:
     as real mL and scaled internally before writing.
   fields:
     device_id:
-      name: Device ID
-      description: >
-        The Gizwits ``did`` (e.g. ``9Y4EeBqQuIfwfqR8XvvrRT``). You can copy
-        it from the device card in Home Assistant.
+      name: Doser
+      description: Which MD-4.4 doser to write to.
       required: true
-      example: 9Y4EeBqQuIfwfqR8XvvrRT
       selector:
-        text:
+        device:
+          integration: jebao
     channel:
       name: Channel
       description: Which channel to write (1..4).
@@ -55,12 +53,12 @@ set_schedule_slot:
     If the 10x precision toggle is on, quantity_ml is real mL.
   fields:
     device_id:
-      name: Device ID
-      description: The Gizwits ``did``.
+      name: Doser
+      description: Which MD-4.4 doser to edit.
       required: true
-      example: 9Y4EeBqQuIfwfqR8XvvrRT
       selector:
-        text:
+        device:
+          integration: jebao
     channel:
       name: Channel
       description: Which channel (1..4).
@@ -118,11 +116,12 @@ delete_schedule_slot:
     set_schedule_slot — 1-based on the visible entries.
   fields:
     device_id:
-      name: Device ID
+      name: Doser
+      description: Which MD-4.4 doser to edit.
       required: true
-      example: 9Y4EeBqQuIfwfqR8XvvrRT
       selector:
-        text:
+        device:
+          integration: jebao
     channel:
       name: Channel
       required: true

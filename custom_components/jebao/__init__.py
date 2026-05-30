@@ -12,6 +12,7 @@ from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 
@@ -164,10 +165,36 @@ _DELETE_SLOT_SCHEMA = vol.Schema(
 )
 
 
-def _find_doser(hass: HomeAssistant, target_id: str):
-    """Look up the MD44Device + config entry for a given Gizwits did."""
+def _find_doser(hass: HomeAssistant, target: str):
+    """Look up the MD44Device + config entry for a service call's device target.
+
+    Accepts either:
+      * an HA device-registry ID (the long opaque string the device selector
+        returns), or
+      * the Gizwits ``did`` directly (kept as a fallback so manually-written
+        automations from earlier versions don't break).
+
+    Returns ``(device, entry)`` or ``(None, None)`` if nothing matches.
+    """
+    # First try as an HA device-registry ID: look it up and pull our domain's
+    # identifier out of its identifiers set.
+    gizwits_did: str | None = None
+    registry = dr.async_get(hass)
+    ha_device = registry.async_get(target)
+    if ha_device is not None:
+        for domain, identifier in ha_device.identifiers:
+            if domain == DOMAIN:
+                gizwits_did = identifier
+                break
+    else:
+        # Caller passed the Gizwits did itself.
+        gizwits_did = target
+
+    if gizwits_did is None:
+        return None, None
+
     for stored in hass.data.get(DOMAIN, {}).values():
-        if stored.get("device_id") == target_id and isinstance(
+        if stored.get("device_id") == gizwits_did and isinstance(
             stored.get("device"), MD44Device
         ):
             return stored["device"], stored.get("entry")
