@@ -9,8 +9,8 @@ from jebao import JebaoError, MDP20000Device
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -164,6 +164,21 @@ _DELETE_SLOT_SCHEMA = vol.Schema(
     }
 )
 
+_GET_SCHEDULE_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Required("channel"): _CHANNEL,
+    }
+)
+
+_GET_SLOT_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Required("channel"): _CHANNEL,
+        vol.Required("slot"): _SLOT,
+    }
+)
+
 
 def _find_doser(hass: HomeAssistant, target: str):
     """Look up the MD44Device + config entry for a service call's device target.
@@ -208,6 +223,26 @@ def _ml_to_raw(quantity_ml: float, entry) -> int:
     factor = cal_factor(entry.options) if entry is not None else 1
     raw = int(round(float(quantity_ml) * factor))
     return max(0, min(255, raw))
+
+
+def _raw_to_ml(raw: int, entry) -> float:
+    """Inverse of ``_ml_to_raw``: scale the firmware's byte back to real
+    mL using the 10x precision toggle. Returned as a float so the value
+    keeps its decimal when the toggle is on."""
+    factor = cal_factor(entry.options) if entry is not None else 1
+    return raw / factor if factor != 1 else float(raw)
+
+
+def _entry_to_dict(slot: int, entry_obj, config_entry) -> dict:
+    """Render a ScheduleEntry as a dict suitable for both service-response
+    payloads and entity attributes."""
+    return {
+        "slot": slot,
+        "time": f"{entry_obj.hour:02d}:{entry_obj.minute:02d}",
+        "hour": entry_obj.hour,
+        "minute": entry_obj.minute,
+        "quantity_ml": _raw_to_ml(entry_obj.quantity, config_entry),
+    }
 
 
 def _push_schedule_update(
@@ -328,6 +363,62 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
         await device.set_schedule(channel - 1, entries)
         _push_schedule_update(hass, device, channel - 1, entries)
 
+    async def _handle_get_schedule(call: ServiceCall) -> dict:
+        target_id = call.data["device_id"]
+        channel = int(call.data["channel"])
+        device, entry = _find_doser(hass, target_id)
+        if device is None:
+            raise HomeAssistantError(
+                f"get_schedule: no MD-4.4 found for device {target_id}"
+            )
+        if device.state is None:
+            # Stale cache — force a read so we don't return a placeholder.
+            try:
+                await device.update()
+            except MD44Error as err:
+                raise HomeAssistantError(f"get_schedule: cloud read failed: {err}")
+        entries = device.state.schedules[channel - 1]
+        return {
+            "channel": channel,
+            "factor": cal_factor(entry.options) if entry is not None else 1,
+            "entry_count": len(entries),
+            "entries": [
+                _entry_to_dict(i, e, entry) for i, e in enumerate(entries, start=1)
+            ],
+        }
+
+    async def _handle_get_slot(call: ServiceCall) -> dict:
+        target_id = call.data["device_id"]
+        channel = int(call.data["channel"])
+        slot_1based = int(call.data["slot"])
+        device, entry = _find_doser(hass, target_id)
+        if device is None:
+            raise HomeAssistantError(
+                f"get_schedule_slot: no MD-4.4 found for device {target_id}"
+            )
+        if device.state is None:
+            try:
+                await device.update()
+            except MD44Error as err:
+                raise HomeAssistantError(
+                    f"get_schedule_slot: cloud read failed: {err}"
+                )
+        entries = device.state.schedules[channel - 1]
+        if slot_1based - 1 >= len(entries):
+            # Return a present-but-empty result so automations can branch
+            # cleanly on ``exists: false`` rather than having to catch an
+            # error.
+            return {
+                "channel": channel,
+                "slot": slot_1based,
+                "exists": False,
+            }
+        entry_obj = entries[slot_1based - 1]
+        result = _entry_to_dict(slot_1based, entry_obj, entry)
+        result["channel"] = channel
+        result["exists"] = True
+        return result
+
     hass.services.async_register(
         DOMAIN, "set_schedule", _handle_set_schedule, schema=_SET_SCHEDULE_SCHEMA,
     )
@@ -336,6 +427,16 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, "delete_schedule_slot", _handle_delete_slot, schema=_DELETE_SLOT_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, "get_schedule", _handle_get_schedule,
+        schema=_GET_SCHEDULE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN, "get_schedule_slot", _handle_get_slot,
+        schema=_GET_SLOT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
 
 

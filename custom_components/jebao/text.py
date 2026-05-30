@@ -190,6 +190,45 @@ class MD44ScheduleText(JebaoEntity, TextEntity):
             return self._optimistic
         return self._coordinator_value()
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Expose the schedule as structured data so users can pull it into
+        dashboards without having to parse the text value.
+
+        ``entries`` is a list of ``{slot, time, hour, minute, quantity_ml}``
+        in storage order — slot 1 is the first entry in the text value, etc.
+        Convenience top-level fields (``slot_1_time``, ``slot_1_ml``, ...)
+        cover the common case of pinning just the first one or two slots to
+        a Lovelace card without templating.
+        """
+        state = self.coordinator.data.get("state")
+        factor = self._factor()
+        if state is None:
+            return {"entry_count": 0, "entries": [], "factor": factor}
+        entries = state.schedules[self._idx]
+        structured = []
+        for i, e in enumerate(entries, start=1):
+            qty = e.quantity / factor if factor != 1 else e.quantity
+            structured.append({
+                "slot": i,
+                "time": f"{e.hour:02d}:{e.minute:02d}",
+                "hour": e.hour,
+                "minute": e.minute,
+                "quantity_ml": qty,
+            })
+        attrs: dict = {
+            "entry_count": len(structured),
+            "entries": structured,
+            "factor": factor,
+        }
+        # Flatten the first three entries into top-level attributes so users
+        # can drop them into an Entity card with attribute: slot_1_time
+        # rather than having to template into a list.
+        for i, entry in enumerate(structured[:3], start=1):
+            attrs[f"slot_{i}_time"] = entry["time"]
+            attrs[f"slot_{i}_ml"] = entry["quantity_ml"]
+        return attrs
+
     async def async_set_value(self, value: str) -> None:
         """Replace the channel's schedule. Empty string clears it."""
         factor = self._factor()

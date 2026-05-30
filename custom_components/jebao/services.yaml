@@ -141,3 +141,60 @@ delete_schedule_slot:
           min: 1
           max: 24
           mode: box
+
+get_schedule:
+  name: Get MD-4.4 channel schedule
+  description: >
+    Read the complete schedule for one channel and return it as response
+    data. Quantity values are scaled to real mL when the 10x precision
+    toggle is on. Capture the result in a script with response_variable.
+  fields:
+    device_id:
+      name: Doser
+      required: true
+      selector:
+        device:
+          integration: jebao
+    channel:
+      name: Channel
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 4
+          mode: box
+
+get_schedule_slot:
+  name: Get one MD-4.4 schedule entry
+  description: >
+    Read one entry from a channel's schedule. Slot numbers are 1-based
+    and match the text entity's visible order. If the slot doesn't exist
+    yet, the response contains ``exists: false`` so automations can
+    branch on it without catching an error.
+  fields:
+    device_id:
+      name: Doser
+      required: true
+      selector:
+        device:
+          integration: jebao
+    channel:
+      name: Channel
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 4
+          mode: box
+    slot:
+      name: Slot
+      description: 1-based, matches set_schedule_slot.
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 24
+          mode: box
