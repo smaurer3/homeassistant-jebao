@@ -301,6 +301,15 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
     # input-and-result pair instead of being split across two sections.
     _attr_entity_category = EntityCategory.CONFIG
     _attr_native_unit_of_measurement = "mL"
+    # Pure derived value — never actually unavailable. Without this override
+    # the parent CoordinatorEntity marks us unavailable whenever the
+    # coordinator's last update hasn't landed yet, even though we don't
+    # read from the coordinator's data at all.
+    _attr_available = True
+
+    @property
+    def available(self) -> bool:
+        return True
 
     def __init__(
         self,
@@ -340,21 +349,24 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
             )
         )
 
-    def _desired_ml(self) -> float | None:
+    def _desired_ml(self) -> float:
+        """The current value of the paired Calibration-amount input.
+
+        Falls back to 1.0 if the number entity hasn't published yet (race
+        on first paint) or the bucket got cleared by reload. That matches
+        the input's own default so the sensor never has to show "unknown"
+        on first render.
+        """
         bucket = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        value = bucket.get("dose_input")
-        if value is None:
-            return None
+        value = bucket.get("dose_input", 1.0)
         try:
             return float(value)
         except (TypeError, ValueError):
-            return None
+            return 1.0
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> float:
         desired = self._desired_ml()
-        if desired is None:
-            return None
         factor = cal_factor(self._entry.options)
         # Factor=1: identity (user already enters whole mL into the app).
         # Factor=10: scale up so the user can type a fractional desired mL
