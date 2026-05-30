@@ -216,19 +216,27 @@ def _push_schedule_update(
     channel_idx: int,
     entries: list,
 ) -> None:
-    """Mirror the just-written schedule into the local state cache so the
+    """Mirror the just-written schedule into the coordinator's data so the
     Channel N schedule text entity (and the next-dose / count sensors)
-    re-render straight away rather than waiting for the next coordinator
-    poll. The next real refresh will overwrite this with whatever the
-    cloud reports — by then the cloud should have caught up.
+    re-render immediately rather than waiting for the next poll.
+
+    Subtle bit: the slot services call ``device.update()`` first to get
+    fresh state, which **replaces** ``device.state`` with a new object.
+    ``coordinator.data["state"]`` keeps pointing at the *previous* object
+    until the coordinator's own update cycle runs, so just mutating
+    ``device.state`` wasn't enough — the text entity reads from
+    ``coordinator.data``. Using ``async_set_updated_data`` rebinds the
+    coordinator to the current ``device.state`` and notifies all
+    listeners in one shot. The next real coordinator refresh still happens
+    on schedule and will overwrite this once the cloud catches up.
     """
     if device.state is not None:
         device.state.schedules[channel_idx] = list(entries)
     for stored in hass.data.get(DOMAIN, {}).values():
         if stored.get("device") is device:
             coord = stored.get("coordinator")
-            if coord is not None:
-                coord.async_update_listeners()
+            if coord is not None and device.state is not None:
+                coord.async_set_updated_data({"state": device.state})
             return
 
 
