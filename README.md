@@ -13,29 +13,32 @@ Home Assistant custom integration for Jebao aquarium pumps with local network co
 
 ## Supported Models
 
-- **Jebao MDP-20000** — variable-speed circulation pump (full control)
-- **Jebao MD-4.4** — 4-channel dosing pump (read + on/off control; see below)
+- **Jebao MDP-20000** — variable-speed circulation pump. Controlled locally
+  over your LAN (TCP/12416). No cloud required.
+- **Jebao MD-4.4** — dosing pump (4-head physical body, 8-channel firmware).
+  Controlled via the **Gizwits cloud REST API** (the same backend the
+  official Jebao Aqua app uses). LAN control isn't supported because the
+  shipping firmware silently drops local 0x93 write commands; cloud writes
+  go through without issue.
 
 ### MD-4.4 entities
 
-When an MD-4.4 doser is added the integration exposes:
+When you add an MD-4.4 the integration exposes, for each of the firmware's
+8 channels:
 
-- **Switches**: master power, one ON/OFF per channel (1–4), one timer-enable
-  per channel (controls whether the pump runs its stored schedule)
-- **Sensors**: per-channel programmed-schedule count, per-channel next-dose
-  preview, currently-armed calibration channel, calibration value, the pump's
-  own real-time clock
-- **Binary sensors**: open-circuit alert, MCU↔WiFi UART fault
-- **Numbers**: per-channel "interval in days" (currently read-only — see
-  Limitations below)
+- **Switches**: master power, channe1..channe8, Timer1..8 (timer-enable)
+- **Numbers**: IntervalT1..IntervalT8 (days between scheduled doses, 0–30)
+- **Sensors**: schedule count per channel, next dose preview per channel,
+  calibration channel/value, the pump's clock
+- **Binary sensors**: OpenCircuit, Fault_UART
+- **Buttons**: Sync clock (writes the local wall clock to the pump)
 
-### MD-4.4 limitations
+### MD-4.4 setup
 
-The bit-level write protocol (master / channels / timer enables) is fully
-working. Byte-level writes — setting interval days, editing the stored
-schedule, writing the pump's clock, calibration — are not yet implemented
-because the firmware's write format for those fields hasn't been reverse-
-engineered end-to-end. Those entities are exposed as read-only sensors.
+You'll need the same Gizwits account that the official Jebao Aqua app uses
+(email + password, region usually US). The integration logs in via the
+Gizwits REST API, lists the dosers on your account, and you pick which one
+to add. Credentials are stored in the config entry.
 
 ## Installation
 

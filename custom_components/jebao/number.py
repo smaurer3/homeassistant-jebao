@@ -150,9 +150,10 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
         return float(state.intervals_days[self._idx])
 
     async def async_set_native_value(self, value: float) -> None:
-        _LOGGER.warning(
-            "Channel %d interval write requested (%s days) — byte-level "
-            "writes are not yet implemented on MD-4.4; ignoring.",
-            self._idx + 1,
-            value,
-        )
+        try:
+            await self._device.set_interval_days(self._idx, int(value))
+            await self.coordinator.async_request_refresh()
+        except MD44Error as err:
+            _LOGGER.error(
+                "Failed to set channel %d interval: %s", self._idx + 1, err
+            )

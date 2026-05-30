@@ -13,126 +13,105 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_DEVICE_ID,
+    CONF_DID,
     CONF_INTERFACES,
     CONF_MODEL,
+    CONF_PASSWORD,
+    CONF_REGION,
+    CONF_USERNAME,
     DEFAULT_NAME,
     DOMAIN,
+    GIZWITS_REGIONS,
     MODEL_MD44,
     MODEL_MDP20000,
 )
-from .md44 import MD44Device, MD44Error
+from .gizwits_cloud import GizwitsAuthError, GizwitsCloudClient, GizwitsCloudError
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def validate_connection(hass: HomeAssistant, host: str) -> dict[str, Any]:
-    """Validate we can connect to the device, trying MD-4.4 first then MDP-20000.
-
-    The MD-4.4 doser's status response is far larger than the wavemaker's, so
-    we sniff for it before falling back to the wavemaker handshake.
-
-    Returns:
-        Dict with device info on success
-
-    Raises:
-        JebaoError or MD44Error: Connection or authentication failed
-    """
-    # Try MD-4.4 first: its varint length + 0x91 response signature lets us
-    # detect a doser reliably.
-    md44 = MD44Device(host=host)
-    try:
-        await md44.connect(timeout=10.0)
-        await md44.update()
-        return {
-            "device_id": md44.device_id or f"md44-{host}",
-            "model": MODEL_MD44,
-            "state": "ok",
-            "mac_address": None,
-            "firmware_version": None,
-        }
-    except MD44Error as md44_err:
-        _LOGGER.debug("Not an MD-4.4 (%s); trying MDP-20000", md44_err)
-    finally:
-        try:
-            await md44.disconnect()
-        except Exception:  # pylint: disable=broad-except
-            pass
-
+async def validate_wavemaker_connection(host: str) -> dict[str, Any]:
+    """Probe an IP for an MDP-20000 wavemaker."""
     device = MDP20000Device(host=host)
     try:
         await device.connect(timeout=10.0)
         await device.update()
-
-        info = {
+        return {
             "device_id": device.device_id or "unknown",
             "model": device.model or MODEL_MDP20000,
             "state": device.state.name if device.state else "unknown",
             "mac_address": None,
             "firmware_version": None,
         }
-        return info
     finally:
         await device.disconnect()
 
 
 class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Jebao."""
+    """Top-level Jebao config flow.
 
-    VERSION = 1
+    Branches: choose the wavemaker (LAN discovery/manual IP) path or the
+    doser (Gizwits cloud login) path. The doser firmware doesn't accept
+    LAN writes, so doser users have to authenticate against the cloud.
+    """
+
+    VERSION = 2
 
     def __init__(self) -> None:
-        """Initialize config flow."""
         self._discovered_devices: dict[str, Any] = {}
         self._selected_interfaces: list[str] | None = None
         self._discovery_attempted: bool = False
         self._no_devices_reason: str | None = None
+        # Cloud-flow scratch state
+        self._cloud_username: str | None = None
+        self._cloud_password: str | None = None
+        self._cloud_region: str = "us"
+        self._cloud_devices: list[dict[str, Any]] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step - choose discovery method."""
+        """Top-level menu: pick which pump family."""
         return self.async_show_menu(
             step_id="user",
+            menu_options=["wavemaker", "doser"],
+        )
+
+    # ------------------------------------------------------------------ MDP-20000
+
+    async def async_step_wavemaker(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        return self.async_show_menu(
+            step_id="wavemaker",
             menu_options=["discover", "manual"],
         )
 
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle discovery step - select interfaces."""
         errors = {}
 
         if user_input is not None:
-            # User selected interfaces, proceed with discovery
-            # Extract just the interface names (strip IP addresses in parentheses)
             selected = user_input.get(CONF_INTERFACES, [])
-            self._selected_interfaces = [
-                iface.split(" (")[0] for iface in selected
-            ]
-            _LOGGER.debug(
-                "User selected interfaces: %s -> parsed as: %s",
-                selected,
-                self._selected_interfaces,
-            )
+            self._selected_interfaces = [iface.split(" (")[0] for iface in selected]
             return await self.async_step_select_device()
 
-        # Get available network interfaces
         interfaces = self._get_available_interfaces()
-
         if not interfaces:
             return await self.async_step_manual()
 
-        # Show interface selection form
         return self.async_show_form(
             step_id="discover",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
                         CONF_INTERFACES,
-                        default=interfaces,  # All selected by default
+                        default=interfaces,
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=interfaces,
@@ -152,19 +131,15 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_select_device(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle device selection after discovery."""
         errors = {}
 
         if user_input is not None:
-            # User selected a device
             selected_id = user_input["device"]
             device_info = self._discovered_devices[selected_id]
 
-            # Check if already configured
             await self.async_set_unique_id(device_info["device_id"])
             self._abort_if_unique_id_configured()
 
-            # Create entry
             return self.async_create_entry(
                 title=f"{device_info['model']} ({device_info['ip']})",
                 data={
@@ -176,16 +151,10 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        # Perform discovery
-        _LOGGER.info(
-            "Starting discovery on interfaces: %s", self._selected_interfaces
-        )
-
         try:
             devices = await discover_devices(
                 timeout=10.0, interfaces=self._selected_interfaces
             )
-            _LOGGER.info("Discovery completed, found %d device(s)", len(devices))
         except Exception as err:
             _LOGGER.error("Discovery failed: %s", err, exc_info=True)
             errors["base"] = "discovery_failed"
@@ -195,44 +164,20 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors=errors,
             )
 
-        if not devices:
-            _LOGGER.warning(
-                "No devices found during discovery on interfaces: %s",
-                self._selected_interfaces
-            )
-            self._discovery_attempted = True
-            self._no_devices_reason = "no_devices"
-            return await self.async_step_manual()
+        # The doser flow uses cloud login, so we only surface wavemakers here.
+        wavemakers = [d for d in devices if d.is_mdp20000]
 
-        # Both MDP-20000 wavemakers and MD-4.4 dosers are supported.
-        supported = [d for d in devices if d.is_mdp20000 or d.is_md44]
-
-        if not supported:
-            _LOGGER.warning("No supported Jebao devices found")
+        if not wavemakers:
             self._discovery_attempted = True
             self._no_devices_reason = "no_supported"
             return await self.async_step_manual()
 
-        # Filter out devices already configured in Home Assistant
-        configured_ids = {
-            entry.unique_id
-            for entry in self._async_current_entries()
-        }
-        new_devices = [d for d in supported if d.device_id not in configured_ids]
-        _LOGGER.debug(
-            "Discovery found %d supported device(s), %d already configured, %d new",
-            len(supported),
-            len(supported) - len(new_devices),
-            len(new_devices),
-        )
+        configured_ids = {entry.unique_id for entry in self._async_current_entries()}
+        new_devices = [d for d in wavemakers if d.device_id not in configured_ids]
 
         if not new_devices:
-            _LOGGER.info("All discovered devices are already configured")
             return self.async_abort(reason="already_configured")
 
-        mdp_devices = new_devices
-
-        # Store discovered devices
         self._discovered_devices = {
             f"{d.device_id}_{d.ip_address}": {
                 "device_id": d.device_id,
@@ -241,10 +186,9 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "mac": d.mac_address,
                 "firmware_version": d.firmware_version,
             }
-            for d in mdp_devices
+            for d in new_devices
         }
 
-        # Show device selection
         device_options = [
             selector.SelectOptionDict(
                 value=key,
@@ -265,30 +209,20 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                 }
             ),
-            description_placeholders={
-                "device_count": str(len(mdp_devices)),
-            },
+            description_placeholders={"device_count": str(len(new_devices))},
             errors=errors,
         )
 
     async def async_step_manual(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle manual configuration."""
         errors = {}
-
         if user_input is not None:
             host = user_input[CONF_HOST]
-
             try:
-                # Validate connection
-                info = await validate_connection(self.hass, host)
-
-                # Check if already configured
+                info = await validate_wavemaker_connection(host)
                 await self.async_set_unique_id(info["device_id"])
                 self._abort_if_unique_id_configured()
-
-                # Create entry
                 return self.async_create_entry(
                     title=f"{info['model']} ({host})",
                     data={
@@ -299,70 +233,143 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "firmware_version": info.get("firmware_version"),
                     },
                 )
-
-            except (JebaoError, MD44Error) as err:
+            except JebaoError as err:
                 _LOGGER.error("Failed to connect to %s: %s", host, err)
                 errors["base"] = "cannot_connect"
             except Exception as err:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected error: %s", err)
                 errors["base"] = "unknown"
 
-        # Prepare description placeholders based on discovery context
         description_placeholders = {}
         if self._discovery_attempted:
-            if self._no_devices_reason == "no_devices":
-                description_placeholders["discovery_result"] = (
-                    "⚠️ No Jebao pumps were found during automatic discovery."
-                )
-            elif self._no_devices_reason == "no_supported":
-                description_placeholders["discovery_result"] = (
-                    "⚠️ Discovery found Jebao devices but none were a supported "
-                    "model (MDP-20000 wavemaker or MD-4.4 doser)."
-                )
-            else:
-                description_placeholders["discovery_result"] = (
-                    "⚠️ Automatic discovery did not find any pumps."
-                )
+            description_placeholders["discovery_result"] = (
+                "⚠️ No MDP-20000 wavemakers were found during automatic discovery."
+            )
         else:
             description_placeholders["discovery_result"] = ""
 
-        # Show manual configuration form
         return self.async_show_form(
             step_id="manual",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_HOST): str,
-                }
-            ),
+            data_schema=vol.Schema({vol.Required(CONF_HOST): str}),
             description_placeholders=description_placeholders,
             errors=errors,
         )
 
+    # ------------------------------------------------------------------ MD-4.4
+
+    async def async_step_doser(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 1 of the doser flow: collect Gizwits credentials."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            self._cloud_username = user_input[CONF_USERNAME]
+            self._cloud_password = user_input[CONF_PASSWORD]
+            self._cloud_region = user_input.get(CONF_REGION, "us")
+
+            session = async_get_clientsession(self.hass)
+            client = GizwitsCloudClient(session, region=self._cloud_region)
+            try:
+                await client.login(self._cloud_username, self._cloud_password)
+                self._cloud_devices = await client.get_bindings()
+            except GizwitsAuthError:
+                errors["base"] = "invalid_auth"
+            except GizwitsCloudError as err:
+                _LOGGER.error("Cloud error: %s", err)
+                errors["base"] = "cannot_connect"
+
+            if not errors:
+                return await self.async_step_doser_pick()
+
+        return self.async_show_form(
+            step_id="doser",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME): str,
+                    vol.Required(CONF_PASSWORD): str,
+                    vol.Required(CONF_REGION, default="us"): vol.In(
+                        list(GIZWITS_REGIONS.keys())
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_doser_pick(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2: pick which device on the account to control."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            did = user_input[CONF_DID]
+            device = next((d for d in self._cloud_devices if d["did"] == did), None)
+            if not device:
+                errors["base"] = "device_not_found"
+            else:
+                await self.async_set_unique_id(did)
+                self._abort_if_unique_id_configured()
+
+                title = device.get("dev_alias") or device.get("product_name") or did
+                return self.async_create_entry(
+                    title=f"MD-4.4 ({title})",
+                    data={
+                        CONF_USERNAME: self._cloud_username,
+                        CONF_PASSWORD: self._cloud_password,
+                        CONF_REGION: self._cloud_region,
+                        CONF_DID: did,
+                        CONF_DEVICE_ID: did,
+                        CONF_MODEL: MODEL_MD44,
+                        "mac_address": device.get("mac"),
+                        "firmware_version": device.get("wifi_soft_version"),
+                    },
+                )
+
+        if not self._cloud_devices:
+            return self.async_abort(reason="no_devices_on_account")
+
+        options = [
+            selector.SelectOptionDict(
+                value=d["did"],
+                label=(
+                    f"{d.get('dev_alias') or d.get('product_name') or 'Unknown'} "
+                    f"({d['did']})"
+                ),
+            )
+            for d in self._cloud_devices
+        ]
+
+        return self.async_show_form(
+            step_id="doser_pick",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_DID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    # ------------------------------------------------------------------ helpers
+
     @staticmethod
     def _get_available_interfaces() -> list[str]:
-        """Get available network interfaces.
-
-        Returns:
-            List of interface names that have IPv4 addresses
-        """
         interfaces = []
-
         try:
             for iface in netifaces.interfaces():
-                # Skip loopback
                 if iface.startswith("lo"):
                     continue
-
-                # Check if interface has IPv4 address
                 addrs = netifaces.ifaddresses(iface)
                 if netifaces.AF_INET in addrs:
-                    # Get IP to show in description
                     ip = addrs[netifaces.AF_INET][0]["addr"]
                     interfaces.append(f"{iface} ({ip})")
-
         except Exception as err:
             _LOGGER.error("Error enumerating interfaces: %s", err)
-
         return interfaces
 
     @staticmethod
@@ -370,26 +377,19 @@ class JebaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> JebaoOptionsFlow:
-        """Get options flow handler.
-
-        Don't pass ``config_entry`` — newer HA exposes it as a read-only
-        property auto-populated by the flow manager.
-        """
         return JebaoOptionsFlow()
 
 
 class JebaoOptionsFlow(config_entries.OptionsFlow):
-    """Handle options flow for Jebao.
+    """Options flow for Jebao.
 
-    HA 2024.11+ made ``config_entry`` a read-only property on ``OptionsFlow``
-    and populates it from the flow manager, so subclasses must not assign to
-    it themselves.
+    HA 2024.11+ exposes ``config_entry`` as a read-only property, so we
+    don't store it ourselves — the flow manager handles that for us.
     """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Manage options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 

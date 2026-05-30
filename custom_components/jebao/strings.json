@@ -3,48 +3,75 @@
     "step": {
       "user": {
         "title": "Jebao Pump Setup",
-        "description": "Choose how to add your Jebao pump to Home Assistant.\n\n**Automatic discovery** - Scan your network for pumps (recommended)\n**Manual configuration** - Enter IP address if you know it",
+        "description": "Which Jebao pump are you adding?",
         "menu_options": {
-          "discover": "Automatic discovery (scan network for pumps)",
-          "manual": "Manual configuration (enter IP address)"
+          "wavemaker": "MDP-20000 wavemaker (local network)",
+          "doser": "MD-4.4 dosing pump (Gizwits cloud)"
+        }
+      },
+      "wavemaker": {
+        "title": "MDP-20000 Wavemaker",
+        "description": "Discover wavemakers on your network, or enter an IP address.",
+        "menu_options": {
+          "discover": "Automatic discovery (scan network)",
+          "manual": "Manual configuration (enter IP)"
         }
       },
       "discover": {
         "title": "Network Discovery",
-        "description": "Select which network interfaces to scan for Jebao pumps. By default, all interfaces are selected.\n\nIf your pumps are on a specific network (like an IoT VLAN), you can deselect other interfaces to speed up discovery.\n\nFound {interface_count} interface(s): {interfaces}",
+        "description": "Select which network interfaces to scan. By default, all interfaces are selected.\n\nFound {interface_count} interface(s): {interfaces}",
         "data": {
-          "interfaces": "Network interfaces to scan (leave all selected if unsure)"
+          "interfaces": "Network interfaces to scan"
         }
       },
       "select_device": {
-        "title": "Select Device",
-        "description": "Found {device_count} Jebao pump(s) on your network.\n\nSelect a pump to add to Home Assistant. Each pump shows its device ID, model and IP address.",
+        "title": "Select Wavemaker",
+        "description": "Found {device_count} wavemaker(s).",
         "data": {
           "device": "Select pump to add"
         }
       },
       "manual": {
-        "title": "Manual Setup",
-        "description": "{discovery_result}\n\nEnter the IP address of your Jebao pump (MDP-20000 wavemaker or MD-4.4 doser).\n\nThe pump must be powered on and connected to the same network as Home Assistant. Port 12416 must be accessible.\n\nExample: 192.168.1.100",
+        "title": "Wavemaker Manual Setup",
+        "description": "{discovery_result}\n\nEnter the IP address of your MDP-20000 wavemaker.\n\nExample: 192.168.1.100",
         "data": {
           "host": "IP Address"
+        }
+      },
+      "doser": {
+        "title": "MD-4.4 Dosing Pump",
+        "description": "The MD-4.4's firmware only accepts control commands through the Gizwits cloud, so we need your Gizwits Aqua app login.\n\nThis is the same email + password you use to sign in to the Jebao Aqua mobile app. Region is usually US.",
+        "data": {
+          "username": "Gizwits email",
+          "password": "Gizwits password",
+          "region": "Region (us / eu / cn)"
+        }
+      },
+      "doser_pick": {
+        "title": "Select Doser",
+        "description": "Pick which dosing pump on your account you want to add.",
+        "data": {
+          "did": "Doser"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to pump. Check the IP address and ensure the pump is powered on.",
-      "discovery_failed": "Discovery failed. Try manual configuration or check your network settings.",
+      "cannot_connect": "Could not connect. Check the IP / network / cloud reachability.",
+      "invalid_auth": "Gizwits cloud rejected those credentials.",
+      "discovery_failed": "Discovery failed. Try manual configuration.",
+      "device_not_found": "That doser is no longer visible on this account.",
       "unknown": "An unexpected error occurred"
     },
     "abort": {
-      "already_configured": "This device is already configured"
+      "already_configured": "This device is already configured",
+      "no_devices_on_account": "No dosers were found on this Gizwits account."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Jebao Options",
-        "description": "Configure how often Home Assistant checks the pump status.\n\nLower values provide more responsive updates but increase network traffic.\n\nRecommended: 30 seconds (default)",
+        "description": "How often Home Assistant polls the pump.",
         "data": {
           "scan_interval": "Status update interval (10-300 seconds)"
         }
@@ -53,9 +80,7 @@
   },
   "entity": {
     "fan": {
-      "pump": {
-        "name": "Pump"
-      }
+      "pump": { "name": "Pump" }
     },
     "switch": {
       "master": { "name": "Master" },
@@ -63,10 +88,18 @@
       "channel_2": { "name": "Channel 2" },
       "channel_3": { "name": "Channel 3" },
       "channel_4": { "name": "Channel 4" },
+      "channel_5": { "name": "Channel 5" },
+      "channel_6": { "name": "Channel 6" },
+      "channel_7": { "name": "Channel 7" },
+      "channel_8": { "name": "Channel 8" },
       "timer_1": { "name": "Timer 1" },
       "timer_2": { "name": "Timer 2" },
       "timer_3": { "name": "Timer 3" },
-      "timer_4": { "name": "Timer 4" }
+      "timer_4": { "name": "Timer 4" },
+      "timer_5": { "name": "Timer 5" },
+      "timer_6": { "name": "Timer 6" },
+      "timer_7": { "name": "Timer 7" },
+      "timer_8": { "name": "Timer 8" }
     },
     "binary_sensor": {
       "feed_mode": { "name": "Feed mode" },
@@ -75,14 +108,19 @@
     },
     "button": {
       "start_feed": { "name": "Start feed" },
-      "cancel_feed": { "name": "Cancel feed" }
+      "cancel_feed": { "name": "Cancel feed" },
+      "sync_time": { "name": "Sync clock" }
     },
     "number": {
       "feed_duration": { "name": "Feed duration" },
       "interval_1": { "name": "Channel 1 interval" },
       "interval_2": { "name": "Channel 2 interval" },
       "interval_3": { "name": "Channel 3 interval" },
-      "interval_4": { "name": "Channel 4 interval" }
+      "interval_4": { "name": "Channel 4 interval" },
+      "interval_5": { "name": "Channel 5 interval" },
+      "interval_6": { "name": "Channel 6 interval" },
+      "interval_7": { "name": "Channel 7 interval" },
+      "interval_8": { "name": "Channel 8 interval" }
     },
     "sensor": {
       "speed": { "name": "Speed" },
@@ -94,10 +132,18 @@
       "sched_count_2": { "name": "Channel 2 schedules" },
       "sched_count_3": { "name": "Channel 3 schedules" },
       "sched_count_4": { "name": "Channel 4 schedules" },
+      "sched_count_5": { "name": "Channel 5 schedules" },
+      "sched_count_6": { "name": "Channel 6 schedules" },
+      "sched_count_7": { "name": "Channel 7 schedules" },
+      "sched_count_8": { "name": "Channel 8 schedules" },
       "next_sched_1": { "name": "Channel 1 next dose" },
       "next_sched_2": { "name": "Channel 2 next dose" },
       "next_sched_3": { "name": "Channel 3 next dose" },
-      "next_sched_4": { "name": "Channel 4 next dose" }
+      "next_sched_4": { "name": "Channel 4 next dose" },
+      "next_sched_5": { "name": "Channel 5 next dose" },
+      "next_sched_6": { "name": "Channel 6 next dose" },
+      "next_sched_7": { "name": "Channel 7 next dose" },
+      "next_sched_8": { "name": "Channel 8 next dose" }
     }
   }
 }
