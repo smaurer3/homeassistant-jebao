@@ -8,6 +8,7 @@ from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
@@ -287,7 +288,7 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
 
     _attr_translation_key = "dose_app_value"
     _attr_icon = "mdi:calculator-variant-outline"
-    _attr_entity_category = "diagnostic"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = "mL"
 
     def __init__(

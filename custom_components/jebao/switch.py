@@ -17,6 +17,7 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -283,7 +284,7 @@ class MD44CalFactorSwitch(JebaoEntity, SwitchEntity):
 
     _attr_translation_key = "cal_factor_10x"
     _attr_icon = "mdi:numeric-10-box-multiple-outline"
-    _attr_entity_category = "config"
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,

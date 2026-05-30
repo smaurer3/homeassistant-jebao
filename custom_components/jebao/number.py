@@ -9,6 +9,7 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
@@ -218,7 +219,7 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
     _attr_native_step = 0.1
     _attr_native_unit_of_measurement = "mL"
     _attr_mode = NumberMode.BOX
-    _attr_entity_category = "config"
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,
