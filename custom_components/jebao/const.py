@@ -59,3 +59,11 @@ CAL_FACTOR_OFF: Final = 1
 def cal_factor(entry_options: dict) -> int:
     """Return the active calibration multiplier for an entry (1 or 10)."""
     return CAL_FACTOR_ON if entry_options.get(OPT_CAL_FACTOR_10X) else CAL_FACTOR_OFF
+
+
+def signal_dose_input_changed(entry_id: str) -> str:
+    """Dispatcher signal fired when this entry's Calibration amount value
+    changes. Subscribed by the Value-to-enter-in-app sensor so it can
+    re-render immediately without waiting for the coordinator's next
+    polling cycle."""
+    return f"jebao_{entry_id}_dose_input_changed"

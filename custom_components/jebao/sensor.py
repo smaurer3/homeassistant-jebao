@@ -11,9 +11,16 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
+from .const import (
+    DOMAIN,
+    MD44_CHANNEL_COUNT,
+    MODEL_MD44,
+    cal_factor,
+    signal_dose_input_changed,
+)
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -304,8 +311,24 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
         self._entry = entry
         self._device_id = device_id
+        # unique_id kept stable so existing installs migrate the entity
+        # cleanly even though the user-visible name is now clearer.
         self._attr_unique_id = f"{device_id}_dose_app_value"
-        self._attr_name = "Required app value"
+        self._attr_name = "Value to enter in app"
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # The paired Calibration-amount number fires this signal whenever
+        # its value changes. We re-render on the spot rather than waiting
+        # for the next coordinator tick (which doesn't reliably trigger
+        # us anyway because we don't read from coordinator.data).
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_dose_input_changed(self._entry.entry_id),
+                self.async_write_ha_state,
+            )
+        )
 
     def _desired_ml(self) -> float | None:
         bucket = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})

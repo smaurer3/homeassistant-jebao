@@ -12,10 +12,17 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
+from .const import (
+    DOMAIN,
+    MD44_CHANNEL_COUNT,
+    MODEL_MD44,
+    cal_factor,
+    signal_dose_input_changed,
+)
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 from .md44 import MD44Device, MD44Error
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.restore_state import RestoreEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -200,16 +207,16 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
 
 
 class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
-    """Calculator-helper input: type the actual mL you want to dose.
+    """Calculator-helper input: the real mL amount you want the pump to
+    actually dispense.
 
-    Paired with ``MD44DoseAppValueSensor`` in sensor.py — when the 10x
-    calibration mode is on, the sensor shows ``this value * 10`` so you
-    know what raw number to type into the Jebao app's UI (which only
-    accepts whole-mL values). When the calibration toggle is off the
-    sensor mirrors this value verbatim.
+    With the 10x precision toggle ON, the paired "Value to enter in app"
+    sensor multiplies this by 10 so you know what raw integer to type
+    into the Jebao app's schedule (or the Channel N schedule text entity)
+    to actually dispense the amount you set here. With the toggle OFF
+    the sensor mirrors this value verbatim.
 
-    The number persists across HA restarts via ``RestoreEntity`` so you
-    don't have to re-set it every time you reboot.
+    Persists across HA restarts via ``RestoreEntity``.
     """
 
     _attr_translation_key = "dose_input"
@@ -234,8 +241,10 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
         self._entry = entry
         self._value: float = 1.0
+        # unique_id stays at *_dose_input so existing installs migrate
+        # cleanly even though the user-visible name changed.
         self._attr_unique_id = f"{device_id}_dose_input"
-        self._attr_name = "Desired dose"
+        self._attr_name = "Calibration amount"
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -245,16 +254,20 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
                 self._value = float(last_state.state)
             except ValueError:
                 pass
-        # Publish the current value so the paired Required-app-value sensor
-        # can read it without trying to guess our entity_id (which HA derives
-        # from the display name, not the unique_id we set).
-        self._publish_to_shared_state()
+        # Publish the current value + tell the paired sensor to render. The
+        # sensor subscribes to the same signal so changes propagate without
+        # waiting for the coordinator's next poll cycle.
+        self._publish(emit_signal=True)
 
-    def _publish_to_shared_state(self) -> None:
+    def _publish(self, *, emit_signal: bool) -> None:
         bucket = self.hass.data.setdefault(DOMAIN, {}).setdefault(
             self._entry.entry_id, {}
         )
         bucket["dose_input"] = self._value
+        if emit_signal:
+            async_dispatcher_send(
+                self.hass, signal_dose_input_changed(self._entry.entry_id)
+            )
 
     @property
     def native_value(self) -> float:
@@ -262,7 +275,5 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         self._value = round(float(value), 1)
-        self._publish_to_shared_state()
+        self._publish(emit_signal=True)
         self.async_write_ha_state()
-        # Force the paired sensor's listener to recompute now.
-        await self.coordinator.async_request_refresh()
