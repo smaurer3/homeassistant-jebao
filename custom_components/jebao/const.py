@@ -20,9 +20,13 @@ DEFAULT_SCAN_INTERVAL: Final = 30  # seconds
 MODEL_MDP20000: Final = "MDP-20000"
 MODEL_MD44: Final = "MD-4.4"
 
-# MD-4.4 firmware exposes 8 channels / 8 timers / 8 intervals through the
-# Gizwits cloud even though the physical pump body only has 4 outputs.
-MD44_CHANNEL_COUNT: Final = 8
+# The MD-4.4's firmware exposes channe1..channe8 / Timer1..8ON /
+# IntervalT1..8 over the cloud — likely because the firmware is shared
+# with an 8-head SKU — but the physical pump body has only 4 outputs.
+# We only surface the four that actually do anything; channels 5..8 read
+# as always-False on a real MD-4.4 and writes to them are silently ignored
+# by the pump.
+MD44_CHANNEL_COUNT: Final = 4
 
 # Gizwits cloud configuration. App ID was extracted from the decompiled
 # Jebao Aqua Android app (com.gizwits.xb, app version 3.3.1). The region

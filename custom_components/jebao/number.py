@@ -150,10 +150,17 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
         return float(state.intervals_days[self._idx])
 
     async def async_set_native_value(self, value: float) -> None:
+        import asyncio
         try:
             await self._device.set_interval_days(self._idx, int(value))
-            await self.coordinator.async_request_refresh()
         except MD44Error as err:
             _LOGGER.error(
                 "Failed to set channel %d interval: %s", self._idx + 1, err
             )
+            return
+        # Cloud's /latest cache lags pump→MQTT→cloud propagation; give it a
+        # moment before polling so the UI doesn't snap back to the old value.
+        async def _verify() -> None:
+            await asyncio.sleep(3.0)
+            await self.coordinator.async_request_refresh()
+        self.hass.async_create_task(_verify())

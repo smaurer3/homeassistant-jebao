@@ -10,6 +10,7 @@ The MDP-20000 wavemaker doesn't use this platform; it stays on ``fan``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -24,6 +25,13 @@ from .entity import JebaoEntity
 from .md44 import MD44Device, MD44Error
 
 _LOGGER = logging.getLogger(__name__)
+
+# Seconds to wait after a write before polling the cloud again. The pump
+# acknowledges the change locally within a few ms, but the cloud's
+# ``/app/devdata/.../latest`` cache only refreshes after the device sends an
+# MQTT state push — typically ~2 seconds. Refreshing sooner reads the stale
+# value and makes the switch flap back to the old state.
+WRITE_VERIFY_DELAY = 3.0
 
 
 async def async_setup_entry(
@@ -68,7 +76,14 @@ async def async_setup_entry(
 
 
 class _MD44SwitchBase(JebaoEntity, SwitchEntity):
-    """Shared init for MD-4.4 switches."""
+    """Shared init for MD-4.4 switches.
+
+    Each subclass keeps an ``_optimistic`` override so we can show the
+    just-written state immediately and not flap back to the cloud's stale
+    cached value before the pump has reported in.
+    """
+
+    _attr_assumed_state = False
 
     def __init__(
         self,
@@ -82,6 +97,48 @@ class _MD44SwitchBase(JebaoEntity, SwitchEntity):
     ) -> None:
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
         self._device = device
+        self._optimistic: bool | None = None
+
+    def _set_optimistic(self, value: bool) -> None:
+        """Pin the displayed state to ``value`` until the cloud catches up."""
+        self._optimistic = value
+        self.async_write_ha_state()
+
+    def _clear_optimistic(self) -> None:
+        self._optimistic = None
+        self.async_write_ha_state()
+
+    def _coordinator_value(self) -> bool:
+        """Subclasses override to return the boolean from the coordinator."""
+        raise NotImplementedError
+
+    @property
+    def is_on(self) -> bool:
+        if self._optimistic is not None:
+            return self._optimistic
+        return self._coordinator_value()
+
+    async def _do_write(self, target: bool, write_coro) -> None:
+        """Run the cloud write, pin the optimistic state, and schedule a
+        delayed refresh once the cloud has had time to learn the new value."""
+        self._set_optimistic(target)
+        try:
+            await write_coro
+        except MD44Error as err:
+            # Roll back to whatever the coordinator believes.
+            self._clear_optimistic()
+            raise err
+
+        async def _verify() -> None:
+            await asyncio.sleep(WRITE_VERIFY_DELAY)
+            try:
+                await self.coordinator.async_request_refresh()
+            finally:
+                # Once the coordinator has a fresh value, drop the pin so
+                # the cloud's authoritative answer wins.
+                self._clear_optimistic()
+
+        self.hass.async_create_task(_verify())
 
 
 class MD44MasterSwitch(_MD44SwitchBase):
@@ -95,22 +152,19 @@ class MD44MasterSwitch(_MD44SwitchBase):
         self._attr_unique_id = f"{device_id}_master"
         self._attr_name = "Master"
 
-    @property
-    def is_on(self) -> bool:
+    def _coordinator_value(self) -> bool:
         state = self.coordinator.data.get("state")
         return bool(state and state.master_on)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         try:
-            await self._device.set_master(True)
-            await self.coordinator.async_request_refresh()
+            await self._do_write(True, self._device.set_master(True))
         except MD44Error as err:
             _LOGGER.error("Failed to turn on master: %s", err)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         try:
-            await self._device.set_master(False)
-            await self.coordinator.async_request_refresh()
+            await self._do_write(False, self._device.set_master(False))
         except MD44Error as err:
             _LOGGER.error("Failed to turn off master: %s", err)
 
@@ -128,8 +182,7 @@ class MD44ChannelSwitch(_MD44SwitchBase):
         self._attr_name = f"Channel {ch_number}"
         self._attr_translation_key = f"channel_{ch_number}"
 
-    @property
-    def is_on(self) -> bool:
+    def _coordinator_value(self) -> bool:
         state = self.coordinator.data.get("state")
         if not state:
             return False
@@ -137,15 +190,13 @@ class MD44ChannelSwitch(_MD44SwitchBase):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         try:
-            await self._device.set_channel(self._idx, True)
-            await self.coordinator.async_request_refresh()
+            await self._do_write(True, self._device.set_channel(self._idx, True))
         except MD44Error as err:
             _LOGGER.error("Failed to turn on channel %d: %s", self._idx + 1, err)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         try:
-            await self._device.set_channel(self._idx, False)
-            await self.coordinator.async_request_refresh()
+            await self._do_write(False, self._device.set_channel(self._idx, False))
         except MD44Error as err:
             _LOGGER.error("Failed to turn off channel %d: %s", self._idx + 1, err)
 
@@ -167,8 +218,7 @@ class MD44TimerEnableSwitch(_MD44SwitchBase):
         self._attr_name = f"Timer {ch_number}"
         self._attr_translation_key = f"timer_{ch_number}"
 
-    @property
-    def is_on(self) -> bool:
+    def _coordinator_value(self) -> bool:
         state = self.coordinator.data.get("state")
         if not state:
             return False
@@ -176,14 +226,12 @@ class MD44TimerEnableSwitch(_MD44SwitchBase):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         try:
-            await self._device.set_timer_enabled(self._idx, True)
-            await self.coordinator.async_request_refresh()
+            await self._do_write(True, self._device.set_timer_enabled(self._idx, True))
         except MD44Error as err:
             _LOGGER.error("Failed to enable timer %d: %s", self._idx + 1, err)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         try:
-            await self._device.set_timer_enabled(self._idx, False)
-            await self.coordinator.async_request_refresh()
+            await self._do_write(False, self._device.set_timer_enabled(self._idx, False))
         except MD44Error as err:
             _LOGGER.error("Failed to disable timer %d: %s", self._idx + 1, err)
