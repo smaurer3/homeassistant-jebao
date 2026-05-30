@@ -26,12 +26,13 @@ from .md44 import MD44Device, MD44Error
 
 _LOGGER = logging.getLogger(__name__)
 
-# Seconds to wait after a write before polling the cloud again. The pump
-# acknowledges the change locally within a few ms, but the cloud's
-# ``/app/devdata/.../latest`` cache only refreshes after the device sends an
-# MQTT state push — typically ~2 seconds. Refreshing sooner reads the stale
-# value and makes the switch flap back to the old state.
-WRITE_VERIFY_DELAY = 3.0
+# Pump -> MQTT -> cloud cache propagation takes 2-5 seconds in practice,
+# sometimes longer. We poll the cloud on a short interval and only release
+# the optimistic pin once the cloud confirms our just-written value; if
+# the cloud never catches up we give up after VERIFY_TIMEOUT seconds so
+# the pin can't get stuck forever.
+VERIFY_POLL_INTERVAL = 2.0
+VERIFY_TIMEOUT = 20.0
 
 
 async def async_setup_entry(
@@ -119,23 +120,40 @@ class _MD44SwitchBase(JebaoEntity, SwitchEntity):
         return self._coordinator_value()
 
     async def _do_write(self, target: bool, write_coro) -> None:
-        """Run the cloud write, pin the optimistic state, and schedule a
-        delayed refresh once the cloud has had time to learn the new value."""
+        """Run the cloud write and hold the optimistic state until the
+        cloud's cached value catches up.
+
+        The previous shape (fixed 3-second delay then unconditional clear)
+        leaked the cloud's stale OFF/ON back into the UI when the cloud
+        lagged longer than that. Now we keep polling — short interval,
+        capped total wait — and only release the pin once the coordinator
+        sees the value we wrote.
+        """
         self._set_optimistic(target)
         try:
             await write_coro
         except MD44Error as err:
-            # Roll back to whatever the coordinator believes.
             self._clear_optimistic()
             raise err
 
         async def _verify() -> None:
-            await asyncio.sleep(WRITE_VERIFY_DELAY)
             try:
-                await self.coordinator.async_request_refresh()
+                deadline = self.hass.loop.time() + VERIFY_TIMEOUT
+                while self.hass.loop.time() < deadline:
+                    await asyncio.sleep(VERIFY_POLL_INTERVAL)
+                    try:
+                        await self.coordinator.async_request_refresh()
+                    except Exception:  # pylint: disable=broad-except
+                        # Don't abandon the pin just because one refresh failed.
+                        continue
+                    if self._coordinator_value() == target:
+                        return
+                _LOGGER.debug(
+                    "Verify timed out after %.0fs; cloud still doesn't reflect "
+                    "the write. Releasing optimistic pin.",
+                    VERIFY_TIMEOUT,
+                )
             finally:
-                # Once the coordinator has a fresh value, drop the pin so
-                # the cloud's authoritative answer wins.
                 self._clear_optimistic()
 
         self.hass.async_create_task(_verify())

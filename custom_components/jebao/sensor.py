@@ -128,7 +128,12 @@ class JebaoStateSensor(JebaoEntity, SensorEntity):
 
 
 class MD44CalibrationChannelSensor(JebaoEntity, SensorEntity):
-    """Which channel is currently armed for calibration (1..4)."""
+    """Which channel is currently armed for calibration.
+
+    The cloud returns the value as a localized string label such as
+    ``"校准1"`` (Calibration 1) rather than a number, so we just pass it
+    through verbatim and let the user read what the app would show.
+    """
 
     _attr_translation_key = "calibration_channel"
     _attr_icon = "mdi:tune-variant"
@@ -139,11 +144,11 @@ class MD44CalibrationChannelSensor(JebaoEntity, SensorEntity):
         self._attr_name = "Calibration channel"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> str | None:
         state = self.coordinator.data.get("state")
-        if state is None:
+        if state is None or not state.cal_set:
             return None
-        return state.cal_set + 1
+        return state.cal_set
 
 
 class MD44Calib1Sensor(JebaoEntity, SensorEntity):
@@ -167,7 +172,13 @@ class MD44Calib1Sensor(JebaoEntity, SensorEntity):
 
 
 class MD44ClockSensor(JebaoEntity, SensorEntity):
-    """The clock the pump's MCU currently believes is "now"."""
+    """The clock the pump's MCU currently believes is "now".
+
+    Both ``YMDData`` and ``HMSData`` come from the cloud as 8-char hex
+    strings (e.g. ``"19050a00"`` = year 25, month 5, day 10, dow 0).
+    The pump returns all zeros until ``Sync clock`` has been pressed,
+    so an unset clock just shows "unset" instead of "2000-00-00".
+    """
 
     _attr_translation_key = "clock"
     _attr_icon = "mdi:clock-outline"
@@ -180,18 +191,26 @@ class MD44ClockSensor(JebaoEntity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         state = self.coordinator.data.get("state")
-        if state is None or len(state.ymd) < 4 or len(state.hms) < 4:
+        if state is None:
             return None
-        if state.ymd == b"\x00\x00\x00\x00":
+        ymd_hex = state.ymd or ""
+        hms_hex = state.hms or ""
+        if len(ymd_hex) < 8 or len(hms_hex) < 8:
+            return None
+        if ymd_hex == "00000000" and hms_hex == "00000000":
             return "unset"
         try:
-            year = 2000 + state.ymd[0]
-            return (
-                f"{year:04d}-{state.ymd[1]:02d}-{state.ymd[2]:02d} "
-                f"{state.hms[0]:02d}:{state.hms[1]:02d}:{state.hms[2]:02d}"
-            )
-        except (ValueError, IndexError):
+            ymd = bytes.fromhex(ymd_hex)
+            hms = bytes.fromhex(hms_hex)
+        except ValueError:
             return None
+        if len(ymd) < 3 or len(hms) < 3:
+            return None
+        year = 2000 + ymd[0]
+        return (
+            f"{year:04d}-{ymd[1]:02d}-{ymd[2]:02d} "
+            f"{hms[0]:02d}:{hms[1]:02d}:{hms[2]:02d}"
+        )
 
 
 class MD44ScheduleCountSensor(JebaoEntity, SensorEntity):

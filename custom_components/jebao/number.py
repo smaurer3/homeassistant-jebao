@@ -136,6 +136,7 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
         self._device = device
         self._idx = idx
+        self._optimistic: float | None = None
         ch = idx + 1
         self._attr_unique_id = f"{device_id}_interval_{ch}"
         self._attr_name = f"Channel {ch} interval"
@@ -143,6 +144,8 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
 
     @property
     def native_value(self) -> float | None:
+        if self._optimistic is not None:
+            return self._optimistic
         state = self.coordinator.data.get("state")
         if state is None:
             return None
@@ -150,16 +153,33 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         import asyncio
+        target = int(value)
+        self._optimistic = float(target)
+        self.async_write_ha_state()
         try:
-            await self._device.set_interval_days(self._idx, int(value))
+            await self._device.set_interval_days(self._idx, target)
         except MD44Error as err:
             _LOGGER.error(
                 "Failed to set channel %d interval: %s", self._idx + 1, err
             )
+            self._optimistic = None
+            self.async_write_ha_state()
             return
-        # Cloud's /latest cache lags pump→MQTT→cloud propagation; give it a
-        # moment before polling so the UI doesn't snap back to the old value.
+
         async def _verify() -> None:
-            await asyncio.sleep(3.0)
-            await self.coordinator.async_request_refresh()
+            try:
+                deadline = self.hass.loop.time() + 20.0
+                while self.hass.loop.time() < deadline:
+                    await asyncio.sleep(2.0)
+                    try:
+                        await self.coordinator.async_request_refresh()
+                    except Exception:  # pylint: disable=broad-except
+                        continue
+                    state = self.coordinator.data.get("state")
+                    if state is not None and state.intervals_days[self._idx] == target:
+                        return
+            finally:
+                self._optimistic = None
+                self.async_write_ha_state()
+
         self.hass.async_create_task(_verify())
