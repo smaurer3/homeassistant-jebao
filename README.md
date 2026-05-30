@@ -191,8 +191,10 @@ The schedule text entity also exposes structured attributes — see
 
 ### MD-4.4 schedule services
 
-All five services accept the doser as a **device picker** (or the raw
-Gizwits `did` string for backward compatibility with older automations).
+All five services accept the doser as a **device picker** in the
+Developer Tools UI — pick which MD-4.4 you want to act on from the
+dropdown. Examples below use `!device` so the YAML reads cleanly,
+but in practice the UI fills this in for you.
 
 #### `jebao.set_schedule`
 

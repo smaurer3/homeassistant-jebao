@@ -101,6 +101,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # The schedule-slot services need access to entry.options to read
         # the 10x precision toggle when converting real mL to raw bytes.
         "entry": entry,
+        # Default the Calibration-amount slot before platforms load so the
+        # paired "Value to enter in app" sensor never reads an empty bucket
+        # during startup. The number entity overwrites this from its
+        # restored state in async_added_to_hass.
+        "dose_input": 1.0,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -183,31 +188,24 @@ _GET_SLOT_SCHEMA = vol.Schema(
 def _find_doser(hass: HomeAssistant, target: str):
     """Look up the MD44Device + config entry for a service call's device target.
 
-    Accepts either:
-      * an HA device-registry ID (the long opaque string the device selector
-        returns), or
-      * the Gizwits ``did`` directly (kept as a fallback so manually-written
-        automations from earlier versions don't break).
+    The device picker in services.yaml passes an HA device-registry ID
+    (a long opaque string). We resolve that to the Gizwits ``did`` by
+    pulling our domain's identifier out of the matched device's
+    ``identifiers`` set, then locate the stored MD44Device.
 
     Returns ``(device, entry)`` or ``(None, None)`` if nothing matches.
     """
-    # First try as an HA device-registry ID: look it up and pull our domain's
-    # identifier out of its identifiers set.
-    gizwits_did: str | None = None
     registry = dr.async_get(hass)
     ha_device = registry.async_get(target)
-    if ha_device is not None:
-        for domain, identifier in ha_device.identifiers:
-            if domain == DOMAIN:
-                gizwits_did = identifier
-                break
-    else:
-        # Caller passed the Gizwits did itself.
-        gizwits_did = target
-
+    if ha_device is None:
+        return None, None
+    gizwits_did: str | None = None
+    for domain, identifier in ha_device.identifiers:
+        if domain == DOMAIN:
+            gizwits_did = identifier
+            break
     if gizwits_did is None:
         return None, None
-
     for stored in hass.data.get(DOMAIN, {}).values():
         if stored.get("device_id") == gizwits_did and isinstance(
             stored.get("device"), MD44Device
