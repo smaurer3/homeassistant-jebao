@@ -249,7 +249,7 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
         # unique_id stays at *_dose_input so existing installs migrate
         # cleanly even though the user-visible name changed.
         self._attr_unique_id = f"{device_id}_dose_input"
-        self._attr_name = "Calibration amount"
+        self._attr_name = "Actual calibration amount"
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

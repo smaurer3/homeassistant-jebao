@@ -296,7 +296,10 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
 
     _attr_translation_key = "dose_app_value"
     _attr_icon = "mdi:calculator-variant-outline"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Lives in the Configuration card next to its paired input rather than
+    # under Diagnostic, so the calibration workflow shows up as a single
+    # input-and-result pair instead of being split across two sections.
+    _attr_entity_category = EntityCategory.CONFIG
     _attr_native_unit_of_measurement = "mL"
 
     def __init__(
