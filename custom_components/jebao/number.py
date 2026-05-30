@@ -245,6 +245,16 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
                 self._value = float(last_state.state)
             except ValueError:
                 pass
+        # Publish the current value so the paired Required-app-value sensor
+        # can read it without trying to guess our entity_id (which HA derives
+        # from the display name, not the unique_id we set).
+        self._publish_to_shared_state()
+
+    def _publish_to_shared_state(self) -> None:
+        bucket = self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            self._entry.entry_id, {}
+        )
+        bucket["dose_input"] = self._value
 
     @property
     def native_value(self) -> float:
@@ -252,6 +262,7 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         self._value = round(float(value), 1)
+        self._publish_to_shared_state()
         self.async_write_ha_state()
-        # Nudge the coordinator so the paired sensor re-renders right away.
+        # Force the paired sensor's listener to recompute now.
         await self.coordinator.async_request_refresh()

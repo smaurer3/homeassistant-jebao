@@ -307,28 +307,41 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
         self._attr_unique_id = f"{device_id}_dose_app_value"
         self._attr_name = "Required app value"
 
-    @property
-    def native_value(self) -> int | None:
-        # Find the paired input entity's current value via HA's state machine.
-        # We don't have a direct reference (the number platform owns it) so
-        # this is a string lookup.
-        input_state = self.hass.states.get(f"number.{self._device_id}_dose_input")
-        if input_state is None or input_state.state in (None, "", "unknown", "unavailable"):
+    def _desired_ml(self) -> float | None:
+        bucket = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        value = bucket.get("dose_input")
+        if value is None:
             return None
         try:
-            desired_ml = float(input_state.state)
-        except ValueError:
+            return float(value)
+        except (TypeError, ValueError):
             return None
-        return int(round(desired_ml * cal_factor(self._entry.options)))
+
+    @property
+    def native_value(self) -> float | None:
+        desired = self._desired_ml()
+        if desired is None:
+            return None
+        factor = cal_factor(self._entry.options)
+        # Factor=1: identity (user already enters whole mL into the app).
+        # Factor=10: scale up so the user can type a fractional desired mL
+        # and read the integer they need to type into the app.
+        value = desired * factor
+        # Keep one decimal in case factor=1 (we never get here non-int with
+        # factor=10 because desired * 10 of a 0.1-step value is whole).
+        return round(value, 1) if value != int(value) else int(value)
 
     @property
     def extra_state_attributes(self) -> dict:
         factor = cal_factor(self._entry.options)
+        desired = self._desired_ml()
         return {
             "factor": factor,
+            "desired_ml": desired,
             "hint": (
-                f"With 10x mode {'on' if factor == 10 else 'off'}: the value above is "
-                f"what you type into the Jebao app or the Channel N schedule entity "
-                f"to dispense the 'Desired dose' you set."
+                f"10x mode is {'ON' if factor == 10 else 'OFF'}. "
+                "Type the number above into the Jebao app's schedule (or the "
+                "Channel N schedule text in HA) to actually dispense the "
+                "'Desired dose' you set."
             ),
         }
