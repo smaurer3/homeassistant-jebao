@@ -24,19 +24,26 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44
+from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 from .md44 import MD44Device, MD44Error, ScheduleEntry
 
 _LOGGER = logging.getLogger(__name__)
 
-_ENTRY_RE = re.compile(r"\s*(\d{1,2})\s*:\s*(\d{1,2})\s*=\s*(\d{1,3})\s*")
+# Match HH:MM=mL where mL can be either an integer ("3") or a single-decimal
+# float ("1.4") — the latter is the user-visible representation when the 10x
+# calibration mode is on.
+_ENTRY_RE = re.compile(
+    r"\s*(\d{1,2})\s*:\s*(\d{1,2})\s*=\s*(\d{1,3}(?:\.\d)?)\s*"
+)
 
 
-def parse_schedule_text(text: str) -> list[ScheduleEntry]:
+def parse_schedule_text(text: str, factor: int = 1) -> list[ScheduleEntry]:
     """Parse ``HH:MM=mL[, HH:MM=mL ...]`` into ScheduleEntry list.
 
+    ``factor`` scales the user-visible mL up to the integer the firmware
+    actually stores (1 for normal mode, 10 for the 10x precision mode).
     Raises ``ValueError`` on bad format / out-of-range values.
     """
     text = (text or "").strip()
@@ -51,22 +58,31 @@ def parse_schedule_text(text: str) -> list[ScheduleEntry]:
             raise ValueError(
                 f"Bad entry {piece!r}; expected HH:MM=mL (e.g. 12:00=3)"
             )
-        hour, minute, qty = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+        ml_real = float(m.group(3))
         if not 0 <= hour <= 23:
             raise ValueError(f"hour out of range in {piece!r}: {hour}")
         if not 0 <= minute <= 59:
             raise ValueError(f"minute out of range in {piece!r}: {minute}")
-        if not 0 <= qty <= 255:
-            raise ValueError(f"quantity out of range in {piece!r}: {qty}")
-        entries.append(ScheduleEntry(hour=hour, minute=minute, quantity=qty))
+        raw = int(round(ml_real * factor))
+        if not 0 <= raw <= 255:
+            raise ValueError(
+                f"quantity out of range in {piece!r}: {ml_real} mL × {factor}x = {raw}"
+            )
+        entries.append(ScheduleEntry(hour=hour, minute=minute, quantity=raw))
     return entries
 
 
-def format_schedule(entries) -> str:
+def format_schedule(entries, factor: int = 1) -> str:
     if not entries:
         return ""
+    if factor == 1:
+        return ", ".join(
+            f"{e.hour:02d}:{e.minute:02d}={int(e.quantity)}" for e in entries
+        )
     return ", ".join(
-        f"{e.hour:02d}:{e.minute:02d}={int(e.quantity)}" for e in entries
+        f"{e.hour:02d}:{e.minute:02d}={e.quantity / factor:.1f}" for e in entries
     )
 
 
@@ -101,7 +117,7 @@ async def async_setup_entry(
     for idx in range(MD44_CHANNEL_COUNT):
         entities.append(
             MD44ScheduleText(
-                coordinator, device_id, model, host, device, idx,
+                coordinator, device_id, model, host, device, idx, entry,
                 mac_address, firmware_version,
             )
         )
@@ -124,12 +140,14 @@ class MD44ScheduleText(JebaoEntity, TextEntity):
         host: str,
         device: MD44Device,
         idx: int,
+        entry,
         mac_address: str | None = None,
         firmware_version: str | None = None,
     ) -> None:
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
         self._device = device
         self._idx = idx
+        self._entry = entry
         self._optimistic: Optional[str] = None
         self._verify_task: Optional[asyncio.Task] = None
         ch = idx + 1
@@ -137,11 +155,14 @@ class MD44ScheduleText(JebaoEntity, TextEntity):
         self._attr_name = f"Channel {ch} schedule"
         self._attr_translation_key = f"schedule_{ch}"
 
+    def _factor(self) -> int:
+        return cal_factor(self._entry.options)
+
     def _coordinator_value(self) -> str:
         state = self.coordinator.data.get("state")
         if state is None:
             return ""
-        return format_schedule(state.schedules[self._idx])
+        return format_schedule(state.schedules[self._idx], self._factor())
 
     @property
     def native_value(self) -> str | None:
@@ -151,8 +172,9 @@ class MD44ScheduleText(JebaoEntity, TextEntity):
 
     async def async_set_value(self, value: str) -> None:
         """Replace the channel's schedule. Empty string clears it."""
+        factor = self._factor()
         try:
-            entries = parse_schedule_text(value)
+            entries = parse_schedule_text(value, factor=factor)
         except ValueError as err:
             _LOGGER.error("Channel %d: bad schedule string: %s", self._idx + 1, err)
             return
@@ -163,7 +185,7 @@ class MD44ScheduleText(JebaoEntity, TextEntity):
             self._verify_task = None
 
         # Reformat so the optimistic view matches what we wrote.
-        target = format_schedule(entries)
+        target = format_schedule(entries, factor)
         self._optimistic = target
         self.async_write_ha_state()
 

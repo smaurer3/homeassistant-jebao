@@ -99,7 +99,8 @@
       "timer_5": { "name": "Timer 5" },
       "timer_6": { "name": "Timer 6" },
       "timer_7": { "name": "Timer 7" },
-      "timer_8": { "name": "Timer 8" }
+      "timer_8": { "name": "Timer 8" },
+      "cal_factor_10x": { "name": "10x dose precision" }
     },
     "binary_sensor": {
       "feed_mode": { "name": "Feed mode" },
@@ -120,7 +121,8 @@
       "interval_5": { "name": "Channel 5 interval" },
       "interval_6": { "name": "Channel 6 interval" },
       "interval_7": { "name": "Channel 7 interval" },
-      "interval_8": { "name": "Channel 8 interval" }
+      "interval_8": { "name": "Channel 8 interval" },
+      "dose_input": { "name": "Desired dose" }
     },
     "text": {
       "schedule_1": { "name": "Channel 1 schedule" },
@@ -149,7 +151,8 @@
       "next_sched_5": { "name": "Channel 5 next dose" },
       "next_sched_6": { "name": "Channel 6 next dose" },
       "next_sched_7": { "name": "Channel 7 next dose" },
-      "next_sched_8": { "name": "Channel 8 next dose" }
+      "next_sched_8": { "name": "Channel 8 next dose" },
+      "dose_app_value": { "name": "Required app value" }
     }
   }
 }

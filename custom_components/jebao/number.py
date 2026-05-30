@@ -11,10 +11,11 @@ from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44
+from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 from .md44 import MD44Device, MD44Error
+from homeassistant.helpers.restore_state import RestoreEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,14 +46,17 @@ async def async_setup_entry(
         coordinator = data["coordinator"]
 
     if model == MODEL_MD44:
-        # Interval-in-days entities are read-only for now: the byte-level
-        # write protocol is documented but not yet validated end-to-end on
-        # this firmware, so we show the value but don't accept changes.
         entities: list[NumberEntity] = []
         for idx in range(MD44_CHANNEL_COUNT):
             entities.append(
                 MD44IntervalDaysSensor(coordinator, device_id, model, host, device, idx, mac_address, firmware_version)
             )
+        # Dose calculator pair — the user types the actual mL they want into
+        # ``MD44DoseInputNumber`` and reads the matching app-side value off
+        # ``MD44DoseAppValueSensor`` (defined in sensor.py).
+        entities.append(
+            MD44DoseInputNumber(coordinator, device_id, model, host, entry, mac_address, firmware_version)
+        )
         async_add_entities(entities)
         return
 
@@ -119,7 +123,10 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
     _attr_mode = NumberMode.BOX
     _attr_native_min_value = 0
     _attr_native_max_value = 255
+    # Integer step so HA renders the value without a ".0" suffix — the pump
+    # only stores whole-day intervals.
     _attr_native_step = 1
+    _attr_suggested_display_precision = 0
     _attr_icon = "mdi:calendar-range"
 
     def __init__(
@@ -189,3 +196,61 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
                 self.async_write_ha_state()
 
         self._verify_task = self.hass.async_create_task(_verify())
+
+
+class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
+    """Calculator-helper input: type the actual mL you want to dose.
+
+    Paired with ``MD44DoseAppValueSensor`` in sensor.py — when the 10x
+    calibration mode is on, the sensor shows ``this value * 10`` so you
+    know what raw number to type into the Jebao app's UI (which only
+    accepts whole-mL values). When the calibration toggle is off the
+    sensor mirrors this value verbatim.
+
+    The number persists across HA restarts via ``RestoreEntity`` so you
+    don't have to re-set it every time you reboot.
+    """
+
+    _attr_translation_key = "dose_input"
+    _attr_icon = "mdi:beaker-question-outline"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 25.5
+    _attr_native_step = 0.1
+    _attr_native_unit_of_measurement = "mL"
+    _attr_mode = NumberMode.BOX
+    _attr_entity_category = "config"
+
+    def __init__(
+        self,
+        coordinator: JebaoDataUpdateCoordinator,
+        device_id: str,
+        model: str,
+        host: str,
+        entry,
+        mac_address: str | None = None,
+        firmware_version: str | None = None,
+    ) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._entry = entry
+        self._value: float = 1.0
+        self._attr_unique_id = f"{device_id}_dose_input"
+        self._attr_name = "Desired dose"
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state not in (None, "", "unknown", "unavailable"):
+            try:
+                self._value = float(last_state.state)
+            except ValueError:
+                pass
+
+    @property
+    def native_value(self) -> float:
+        return self._value
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._value = round(float(value), 1)
+        self.async_write_ha_state()
+        # Nudge the coordinator so the paired sensor re-renders right away.
+        await self.coordinator.async_request_refresh()

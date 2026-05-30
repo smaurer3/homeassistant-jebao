@@ -10,7 +10,7 @@ from homeassistant.const import PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44
+from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 
@@ -47,6 +47,7 @@ async def async_setup_entry(
             MD44CalibrationChannelSensor(coordinator, device_id, model, host, mac_address, firmware_version),
             MD44Calib1Sensor(coordinator, device_id, model, host, mac_address, firmware_version),
             MD44ClockSensor(coordinator, device_id, model, host, mac_address, firmware_version),
+            MD44DoseAppValueSensor(coordinator, device_id, model, host, entry, mac_address, firmware_version),
         ]
         for idx in range(MD44_CHANNEL_COUNT):
             entities.append(
@@ -267,3 +268,66 @@ class MD44NextScheduleSensor(JebaoEntity, SensorEntity):
         nxt = upcoming[0] if upcoming else sorted_entries[0]
         suffix = "" if upcoming else " (tomorrow)"
         return f"{nxt.hour:02d}:{nxt.minute:02d} ({nxt.quantity_ml:g} mL){suffix}"
+
+
+class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
+    """Companion to ``MD44DoseInputNumber`` (number.py).
+
+    Reads the "Desired dose" number entity that lives on this same device
+    and multiplies it by the active calibration factor. With the 10x
+    toggle on, this is the integer you should type into the Jebao app's
+    schedule field to get the actual mL volume you typed into the input.
+
+    Examples (factor=10):
+        Desired dose = 1.4 → Required app value = 14
+        Desired dose = 0.3 → Required app value = 3
+
+    With the 10x toggle off, this just mirrors the input verbatim.
+    """
+
+    _attr_translation_key = "dose_app_value"
+    _attr_icon = "mdi:calculator-variant-outline"
+    _attr_entity_category = "diagnostic"
+    _attr_native_unit_of_measurement = "mL"
+
+    def __init__(
+        self,
+        coordinator: JebaoDataUpdateCoordinator,
+        device_id: str,
+        model: str,
+        host: str,
+        entry,
+        mac_address: str | None = None,
+        firmware_version: str | None = None,
+    ) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._entry = entry
+        self._device_id = device_id
+        self._attr_unique_id = f"{device_id}_dose_app_value"
+        self._attr_name = "Required app value"
+
+    @property
+    def native_value(self) -> int | None:
+        # Find the paired input entity's current value via HA's state machine.
+        # We don't have a direct reference (the number platform owns it) so
+        # this is a string lookup.
+        input_state = self.hass.states.get(f"number.{self._device_id}_dose_input")
+        if input_state is None or input_state.state in (None, "", "unknown", "unavailable"):
+            return None
+        try:
+            desired_ml = float(input_state.state)
+        except ValueError:
+            return None
+        return int(round(desired_ml * cal_factor(self._entry.options)))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        factor = cal_factor(self._entry.options)
+        return {
+            "factor": factor,
+            "hint": (
+                f"With 10x mode {'on' if factor == 10 else 'off'}: the value above is "
+                f"what you type into the Jebao app or the Channel N schedule entity "
+                f"to dispense the 'Desired dose' you set."
+            ),
+        }

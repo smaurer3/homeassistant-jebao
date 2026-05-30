@@ -19,7 +19,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44
+from .const import (
+    DOMAIN,
+    MD44_CHANNEL_COUNT,
+    MODEL_MD44,
+    OPT_CAL_FACTOR_10X,
+)
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 from .md44 import MD44Device, MD44Error
@@ -65,6 +70,7 @@ async def async_setup_entry(
 
     entities: list[SwitchEntity] = [
         MD44MasterSwitch(coordinator, device_id, model, host, device, mac_address, firmware_version),
+        MD44CalFactorSwitch(coordinator, device_id, model, host, entry, mac_address, firmware_version),
     ]
     for idx in range(MD44_CHANNEL_COUNT):
         entities.append(
@@ -260,3 +266,55 @@ class MD44TimerEnableSwitch(_MD44SwitchBase):
             await self._do_write(False, self._device.set_timer_enabled(self._idx, False))
         except MD44Error as err:
             _LOGGER.error("Failed to disable timer %d: %s", self._idx + 1, err)
+
+
+class MD44CalFactorSwitch(JebaoEntity, SwitchEntity):
+    """Toggles the 10x calibration-factor mode for this pump.
+
+    Stored in the config entry's options (so it persists across HA
+    restarts) rather than as a pump-side attribute — the pump has no
+    concept of this multiplier, it's purely an HA-side display/scaling
+    trick documented in ``const.OPT_CAL_FACTOR_10X``.
+
+    Flipping this switch doesn't touch the pump at all. Schedule and dose
+    calculator entities read the toggle on each update and adjust their
+    visible numbers accordingly.
+    """
+
+    _attr_translation_key = "cal_factor_10x"
+    _attr_icon = "mdi:numeric-10-box-multiple-outline"
+    _attr_entity_category = "config"
+
+    def __init__(
+        self,
+        coordinator: JebaoDataUpdateCoordinator,
+        device_id: str,
+        model: str,
+        host: str,
+        entry,
+        mac_address: str | None = None,
+        firmware_version: str | None = None,
+    ) -> None:
+        super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
+        self._entry = entry
+        self._attr_unique_id = f"{device_id}_cal_factor_10x"
+        self._attr_name = "10x dose precision"
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._entry.options.get(OPT_CAL_FACTOR_10X, False))
+
+    async def _set(self, value: bool) -> None:
+        new_options = dict(self._entry.options)
+        new_options[OPT_CAL_FACTOR_10X] = value
+        self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        self.async_write_ha_state()
+        # Other entities re-read on the next coordinator tick. Nudge it so
+        # the dose calculator + schedule text update immediately.
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set(False)
