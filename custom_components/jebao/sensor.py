@@ -315,7 +315,7 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
         # unique_id kept stable so existing installs migrate the entity
         # cleanly even though the user-visible name is now clearer.
         self._attr_unique_id = f"{device_id}_dose_app_value"
-        self._attr_name = "Value to enter in app"
+        self._attr_name = "Calibration amount to enter in app"
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

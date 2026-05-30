@@ -152,7 +152,7 @@
       "next_sched_6": { "name": "Channel 6 next dose" },
       "next_sched_7": { "name": "Channel 7 next dose" },
       "next_sched_8": { "name": "Channel 8 next dose" },
-      "dose_app_value": { "name": "Value to enter in app" }
+      "dose_app_value": { "name": "Calibration amount to enter in app" }
     }
   }
 }
