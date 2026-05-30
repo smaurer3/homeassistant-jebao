@@ -296,19 +296,20 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
 
     _attr_translation_key = "dose_app_value"
     _attr_icon = "mdi:calculator-variant-outline"
-    # Lives in the Configuration card next to its paired input rather than
-    # under Diagnostic, so the calibration workflow shows up as a single
-    # input-and-result pair instead of being split across two sections.
-    _attr_entity_category = EntityCategory.CONFIG
+    # Sensors live under Diagnostic; EntityCategory.CONFIG only applies to
+    # entities the user changes (numbers, switches, selects). On recent HA
+    # builds the frontend hides the state of CONFIG-category sensors as
+    # "Unavailable" because semantically they aren't supposed to have one —
+    # the value was rendering blank as a result. Keep it Diagnostic; the
+    # paired Configuration card still shows the Calibration amount input
+    # right above the device's Diagnostic block on the device page.
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = "mL"
-    # Pure derived value — never actually unavailable. Without this override
-    # the parent CoordinatorEntity marks us unavailable whenever the
-    # coordinator's last update hasn't landed yet, even though we don't
-    # read from the coordinator's data at all.
-    _attr_available = True
 
     @property
     def available(self) -> bool:
+        # Pure derived value — never depends on the coordinator's last
+        # update, so don't inherit CoordinatorEntity's availability check.
         return True
 
     def __init__(
