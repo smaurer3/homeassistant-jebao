@@ -13,6 +13,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, MODEL_MD44
 from .md44 import MD44Device, MD44Error
 
+# When the WebSocket push subscription is live, the coordinator only needs
+# to poll occasionally as a safety net — pushes carry state in near-real
+# time. Five minutes is a comfortable heartbeat.
+PUSH_FALLBACK_POLL_SECONDS = 300
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -45,6 +50,13 @@ class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=scan_interval),
         )
 
+        # Subscribe to push updates if this is the doser. The WS client
+        # started inside MD44Device fires this callback whenever
+        # ``s2c_noti`` arrives — we just forward to async_set_updated_data
+        # so every listener entity re-renders in the same tick.
+        if isinstance(device, MD44Device):
+            device.on_push_state = self.push_md44_state
+
     @property
     def _is_md44(self) -> bool:
         return isinstance(self.device, MD44Device)
@@ -74,6 +86,20 @@ class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
 
             if self._is_md44:
                 state = await self.device.update()
+                # If the WebSocket subscription is live the next poll can
+                # wait much longer — pushes carry the truth in the
+                # meantime. If it isn't, stay on the user-configured
+                # interval as a working fallback.
+                if self.device.ws_connected:
+                    self.update_interval = timedelta(
+                        seconds=PUSH_FALLBACK_POLL_SECONDS
+                    )
+                else:
+                    self.update_interval = timedelta(
+                        seconds=self.entry.options.get(
+                            "scan_interval", DEFAULT_SCAN_INTERVAL
+                        )
+                    )
                 return {"state": state}
 
             await self.device.update()
@@ -87,6 +113,13 @@ class JebaoDataUpdateCoordinator(DataUpdateCoordinator):
 
         except (JebaoError, MD44Error) as err:
             raise UpdateFailed(f"Error communicating with device: {err}") from err
+
+    def push_md44_state(self, state) -> None:
+        """Called by ``MD44Device.on_push_state`` when a ``s2c_noti`` push
+        message arrives over the WebSocket. Rebinds ``self.data`` so all
+        listening entities re-render against the new state in the same
+        tick, exactly like the regular polling path does."""
+        self.async_set_updated_data({"state": state})
 
     async def _try_discovery_recovery(self) -> Optional[str]:
         """Try to find device via discovery if IP changed (MDP-20000 only)."""

@@ -21,16 +21,18 @@ missing entities.
 """
 from __future__ import annotations
 
+import asyncio
 import binascii
 import datetime as dt
 import logging
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import aiohttp
 
-from .const import MD44_CHANNEL_COUNT
+from .const import GIZWITS_APP_ID, MD44_CHANNEL_COUNT
 from .gizwits_cloud import GizwitsAuthError, GizwitsCloudClient, GizwitsCloudError
+from .gizwits_ws import GizwitsWebSocketClient, GizwitsWebSocketError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,22 +101,36 @@ class MD44State:
         }
 
 
-def _parse_schedule_blob(hex_blob: str) -> List[ScheduleEntry]:
-    """Parse a CH*SWTime hex string into structured entries.
+def _parse_schedule_blob(raw) -> List[ScheduleEntry]:
+    """Parse a CH*SWTime blob into structured entries.
 
-    Layout: 96 bytes (192 hex chars), 24 entries of 4 bytes each:
-      [hour, minute, reserved, quantity_mL]
+    Accepts both formats the Gizwits cloud uses:
 
-    Verified against the Jebao Aqua app by setting a known schedule
-    (CH1 = 3 mL @ 12:00) and reading it back as 0c 00 00 03 in
-    ``CH1SWTime`` byte 0..3. Entries start at byte 0, not byte 1 as
-    older notes implied. All-zero entries are skipped.
+      * Hex string (from ``GET /app/devdata/.../latest``) — 192 chars,
+        96 bytes total.
+      * List of ints (from ``s2c_noti`` push messages over WebSocket) —
+        the same 96 bytes already decoded.
+
+    Layout in either case: 24 entries of 4 bytes each, ``[hour, minute,
+    reserved, quantity_mL]``. Verified by setting a known schedule via
+    the app (CH1 = 3 mL @ 12:00) and reading it back as ``0c 00 00 03``
+    at bytes 0..3. All-zero entries are skipped.
     """
-    if not hex_blob:
+    if not raw:
         return []
-    try:
-        blob = binascii.unhexlify(hex_blob)
-    except (binascii.Error, ValueError):
+    if isinstance(raw, (bytes, bytearray)):
+        blob = bytes(raw)
+    elif isinstance(raw, str):
+        try:
+            blob = binascii.unhexlify(raw)
+        except (binascii.Error, ValueError):
+            return []
+    elif isinstance(raw, list):
+        try:
+            blob = bytes(int(x) & 0xFF for x in raw)
+        except (TypeError, ValueError):
+            return []
+    else:
         return []
     out: List[ScheduleEntry] = []
     for i in range(SCHEDULES_PER_CHANNEL):
@@ -125,6 +141,60 @@ def _parse_schedule_blob(hex_blob: str) -> List[ScheduleEntry]:
         if hour == 0 and minute == 0 and quantity == 0:
             continue
         out.append(ScheduleEntry(hour=hour, minute=minute, quantity=quantity))
+    return out
+
+
+def _ymd_to_hex(raw) -> str:
+    """``YMDData`` / ``HMSData`` come as 8-char hex strings from REST but
+    as 4-element int lists from WS pushes. Normalise to the hex string
+    the rest of the integration expects."""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        try:
+            return bytes(int(x) & 0xFF for x in raw).hex()
+        except (TypeError, ValueError):
+            return "00000000"
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw).hex()
+    return "00000000"
+
+
+def _schedule_to_hex(entries: list) -> str:
+    """Pack a ScheduleEntry list back into the 96-byte hex blob the cloud
+    uses. Inverse of ``_parse_schedule_blob``."""
+    blob = bytearray(SCHEDULE_BLOB_LEN)
+    for i, entry in enumerate(entries[:SCHEDULES_PER_CHANNEL]):
+        base = i * SCHEDULE_ENTRY_LEN
+        blob[base] = int(entry.hour) & 0xFF
+        blob[base + 1] = int(entry.minute) & 0xFF
+        blob[base + 2] = 0
+        blob[base + 3] = max(0, min(255, int(entry.quantity)))
+    return bytes(blob).hex()
+
+
+def _state_to_attrs(state: MD44State) -> dict[str, Any]:
+    """Render an MD44State back to the same key/value shape the cloud's
+    ``/app/devdata/.../latest`` returns. Used so partial push updates
+    (which only include changed keys) can be merged onto a known-good
+    baseline without losing the rest of the state."""
+    out: dict[str, Any] = {
+        "switch": 1 if state.master_on else 0,
+        "CALSW": 1 if state.cal_switch else 0,
+        "CALSet": state.cal_set,
+        "Calib1": state.calib1,
+        "YMDData": state.ymd,
+        "HMSData": state.hms,
+        "channelTTL": state.channel_ttl,
+        "time1": state.time1,
+        "OpenCircuit": 1 if state.open_circuit else 0,
+        "Fault_UART": 1 if state.fault_uart else 0,
+    }
+    for i in range(MD44_CHANNEL_COUNT):
+        out[f"channe{i + 1}"] = 1 if state.channels[i] else 0
+        out[f"Timer{i + 1}ON"] = 1 if state.timers_enabled[i] else 0
+        out[f"IntervalT{i + 1}"] = state.intervals_days[i]
+        out[f"CH{i + 1}SWTime"] = _schedule_to_hex(state.schedules[i])
     return out
 
 
@@ -143,8 +213,8 @@ def _attrs_to_state(attr: dict[str, Any]) -> MD44State:
     s.cal_switch = bool(attr.get("CALSW", 0))
     s.cal_set = str(attr.get("CALSet", ""))
     s.calib1 = int(attr.get("Calib1", 0))
-    s.ymd = str(attr.get("YMDData", "00000000"))
-    s.hms = str(attr.get("HMSData", "00000000"))
+    s.ymd = _ymd_to_hex(attr.get("YMDData", "00000000"))
+    s.hms = _ymd_to_hex(attr.get("HMSData", "00000000"))
     s.channel_ttl = int(attr.get("channelTTL", 0))
     s.time1 = int(attr.get("time1", 0))
     s.open_circuit = bool(attr.get("OpenCircuit", 0))
@@ -167,6 +237,8 @@ class MD44Device:
         device_id: Optional[str] = None,
     ) -> None:
         self._cloud = GizwitsCloudClient(session, region=region)
+        self._session = session
+        self._region = region
         self._username = username
         self._password = password
         self.did = did
@@ -175,6 +247,16 @@ class MD44Device:
         self.device_id = device_id or did
         self.state = MD44State()
         self._connected = False
+        # WebSocket push subscription — created in ``connect`` after we
+        # have a fresh REST token. ``on_push_state`` is called from
+        # ``__init__`` registration; the integration sets this after
+        # the coordinator exists so the push handler can forward to it.
+        self._ws: Optional[GizwitsWebSocketClient] = None
+        # Callback fired on every WS push after state is merged. The
+        # integration's coordinator wires this up so HA entities see the
+        # new state immediately. May return None (sync) or a coroutine
+        # (async); ``_handle_push`` awaits the latter.
+        self.on_push_state: Optional[Callable[[MD44State], Any]] = None
 
     @property
     def host(self) -> str:
@@ -192,8 +274,16 @@ class MD44Device:
     def is_connected(self) -> bool:
         return self._connected and not self._cloud.needs_relogin()
 
+    @property
+    def ws_connected(self) -> bool:
+        """Whether the WebSocket push subscription is currently live.
+        Coordinator uses this to skip routine polling once push is
+        flowing."""
+        return self._ws is not None and self._ws.connected
+
     async def connect(self, timeout: float = 10.0) -> None:  # noqa: D401
-        """Log in to the cloud and prove we can reach the device."""
+        """Log in to the cloud, fetch initial state, and start the
+        WebSocket push subscription."""
         try:
             await self._cloud.login(self._username, self._password)
             await self.update()
@@ -203,8 +293,23 @@ class MD44Device:
         except GizwitsCloudError as err:
             raise MD44ConnectionError(f"Cloud unreachable: {err}") from err
 
+        # Spin up the WS subscription. We never raise if WS fails — the
+        # REST fallback in the coordinator keeps the integration working.
+        self._ws = GizwitsWebSocketClient(
+            session=self._session,
+            app_id=GIZWITS_APP_ID,
+            region=self._region,
+            uid=self._cloud.uid or "",
+            token=self._cloud.token or "",
+            token_refresh=self._refresh_token,
+        )
+        self._ws.register_device(self.did, self._handle_push)
+        await self._ws.start()
+
     async def disconnect(self) -> None:
-        # Nothing to close — the client just uses the shared aiohttp session.
+        if self._ws is not None:
+            await self._ws.stop()
+            self._ws = None
         self._connected = False
 
     async def update(self) -> MD44State:
@@ -215,9 +320,43 @@ class MD44Device:
         self.state = _attrs_to_state(attr)
         return self.state
 
+    async def _refresh_token(self) -> None:
+        """Called from the WS client when the cloud rejected its token
+        mid-flight. Re-login via REST then hand the fresh credentials
+        back to the WS client for the next reconnect."""
+        await self._cloud.login(self._username, self._password)
+        if self._ws is not None:
+            self._ws.update_credentials(self._cloud.uid or "", self._cloud.token or "")
+
+    async def _handle_push(self, did: str, attrs: dict[str, Any]) -> None:
+        """``s2c_noti`` callback. Merges the incoming partial ``attrs``
+        dict into the cached state (the cloud only sends changed keys)
+        and forwards the new state to whatever the coordinator
+        registered with ``on_push_state``."""
+        if did != self.did:
+            return
+        merged = _state_to_attrs(self.state)
+        merged.update(attrs)
+        self.state = _attrs_to_state(merged)
+        callback = self.on_push_state
+        if callback is None:
+            return
+        result = callback(self.state)
+        if asyncio.iscoroutine(result):
+            await result
+
     # ------------------------------------------------------------------ writes
 
     async def _write(self, attrs: dict[str, Any]) -> None:
+        """Send a control command via REST.
+
+        I tested c2s_write on the WebSocket channel — the cloud ACKs it
+        but the change never actually reaches the device. REST control
+        works reliably and the cloud pushes the new state back over the
+        WebSocket within ~1 second, so the UI updates near-realtime
+        anyway. The handful of REST POSTs we still make for writes is
+        dwarfed by the polling we no longer do.
+        """
         try:
             await self._cloud.control(self.did, attrs)
         except GizwitsCloudError as err:
