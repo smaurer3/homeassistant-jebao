@@ -210,6 +210,28 @@ def _ml_to_raw(quantity_ml: float, entry) -> int:
     return max(0, min(255, raw))
 
 
+def _push_schedule_update(
+    hass: HomeAssistant,
+    device: MD44Device,
+    channel_idx: int,
+    entries: list,
+) -> None:
+    """Mirror the just-written schedule into the local state cache so the
+    Channel N schedule text entity (and the next-dose / count sensors)
+    re-render straight away rather than waiting for the next coordinator
+    poll. The next real refresh will overwrite this with whatever the
+    cloud reports — by then the cloud should have caught up.
+    """
+    if device.state is not None:
+        device.state.schedules[channel_idx] = list(entries)
+    for stored in hass.data.get(DOMAIN, {}).values():
+        if stored.get("device") is device:
+            coord = stored.get("coordinator")
+            if coord is not None:
+                coord.async_update_listeners()
+            return
+
+
 async def _async_register_md44_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, "set_schedule"):
         return
@@ -230,6 +252,7 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
             for e in call.data["entries"]
         ]
         await device.set_schedule(channel - 1, entries)
+        _push_schedule_update(hass, device, channel - 1, entries)
 
     async def _handle_set_slot(call: ServiceCall) -> None:
         target_id = call.data["device_id"]
@@ -271,6 +294,7 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
             # Slot past the end AND qty=0 → nothing to do.
             return
         await device.set_schedule(channel - 1, entries)
+        _push_schedule_update(hass, device, channel - 1, entries)
 
     async def _handle_delete_slot(call: ServiceCall) -> None:
         target_id = call.data["device_id"]
@@ -294,6 +318,7 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
             return
         entries.pop(slot_idx)
         await device.set_schedule(channel - 1, entries)
+        _push_schedule_update(hass, device, channel - 1, entries)
 
     hass.services.async_register(
         DOMAIN, "set_schedule", _handle_set_schedule, schema=_SET_SCHEDULE_SCHEMA,
