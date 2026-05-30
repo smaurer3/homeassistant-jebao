@@ -3,7 +3,9 @@ set_schedule:
   description: >
     Overwrite the stored dosing schedule for one channel of an MD-4.4 doser.
     Up to 24 entries per channel. Existing entries on the channel are
-    replaced entirely — pass an empty list to clear the channel.
+    replaced entirely — pass an empty list to clear the channel. If the
+    10x precision toggle is on for this doser, ``quantity_ml`` is treated
+    as real mL and scaled internally before writing.
   fields:
     device_id:
       name: Device ID
@@ -28,15 +30,115 @@ set_schedule:
       name: Schedule entries
       description: >
         List of ``{hour, minute, quantity_ml}`` dictionaries. Up to 24 per
-        channel. Times are in the pump's local clock — sync it first with
-        the "Sync clock" button if you've never set it.
+        channel. quantity_ml may be a decimal when the 10x precision toggle
+        is on (e.g. 0.5). Times are in the pump's local clock — sync it
+        first with the "Sync clock" button if you've never set it.
       required: true
       example: |
         - hour: 12
           minute: 0
-          quantity_ml: 3
+          quantity_ml: 0.3
         - hour: 18
           minute: 30
-          quantity_ml: 2
+          quantity_ml: 0.2
       selector:
         object:
+
+set_schedule_slot:
+  name: Set one MD-4.4 schedule entry
+  description: >
+    Edit a single entry within a channel's schedule (the kind of operation
+    you'd do from an automation — e.g. "bump tomorrow's morning dose by 0.1
+    mL"). Slot numbers match what you see in the channel's schedule text
+    entity, 1-based: slot 1 is the first entry shown. Slots past the
+    current count append a new entry. quantity_ml = 0 deletes the slot.
+    If the 10x precision toggle is on, quantity_ml is real mL.
+  fields:
+    device_id:
+      name: Device ID
+      description: The Gizwits ``did``.
+      required: true
+      example: 9Y4EeBqQuIfwfqR8XvvrRT
+      selector:
+        text:
+    channel:
+      name: Channel
+      description: Which channel (1..4).
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 4
+          mode: box
+    slot:
+      name: Slot
+      description: Which entry to edit (1..24). Use a slot past the current count to append.
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 24
+          mode: box
+    hour:
+      name: Hour
+      required: true
+      example: 14
+      selector:
+        number:
+          min: 0
+          max: 23
+          mode: box
+    minute:
+      name: Minute
+      required: true
+      example: 30
+      selector:
+        number:
+          min: 0
+          max: 59
+          mode: box
+    quantity_ml:
+      name: Quantity (mL)
+      description: 0 deletes this entry. With 10x precision on, this is real mL (e.g. 0.5). With it off, whole mL.
+      required: true
+      example: 0.5
+      selector:
+        number:
+          min: 0
+          max: 25.5
+          step: 0.1
+          mode: box
+
+delete_schedule_slot:
+  name: Delete one MD-4.4 schedule entry
+  description: >
+    Remove a single entry from a channel's schedule. Slot numbering matches
+    set_schedule_slot — 1-based on the visible entries.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      example: 9Y4EeBqQuIfwfqR8XvvrRT
+      selector:
+        text:
+    channel:
+      name: Channel
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 4
+          mode: box
+    slot:
+      name: Slot
+      description: Which entry to delete (1-based, matches the text entity ordering).
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 24
+          mode: box

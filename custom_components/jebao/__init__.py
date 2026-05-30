@@ -21,8 +21,10 @@ from .const import (
     CONF_REGION,
     CONF_USERNAME,
     DOMAIN,
+    MD44_CHANNEL_COUNT,
     MODEL_MD44,
     MODEL_MDP20000,
+    cal_factor,
 )
 from .md44 import MD44Device, MD44Error, ScheduleEntry
 
@@ -95,6 +97,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "model": model,
         "mac_address": mac_address,
         "firmware_version": firmware_version,
+        # The schedule-slot services need access to entry.options to read
+        # the 10x precision toggle when converting real mL to raw bytes.
+        "entry": entry,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -107,24 +112,75 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+_QTY_ML = vol.All(
+    vol.Any(int, float, vol.Coerce(float)),
+    vol.Range(min=0.0, max=25.5),
+)
+_HOUR = vol.All(int, vol.Range(min=0, max=23))
+_MINUTE = vol.All(int, vol.Range(min=0, max=59))
+_CHANNEL = vol.All(int, vol.Range(min=1, max=MD44_CHANNEL_COUNT))
+_SLOT = vol.All(int, vol.Range(min=1, max=24))
+
+
 _SET_SCHEDULE_SCHEMA = vol.Schema(
     {
         vol.Required("device_id"): cv.string,
-        vol.Required("channel"): vol.All(int, vol.Range(min=1, max=4)),
+        vol.Required("channel"): _CHANNEL,
         vol.Required("entries"): vol.All(
             cv.ensure_list,
             [
                 vol.Schema(
                     {
-                        vol.Required("hour"): vol.All(int, vol.Range(min=0, max=23)),
-                        vol.Required("minute"): vol.All(int, vol.Range(min=0, max=59)),
-                        vol.Required("quantity_ml"): vol.All(int, vol.Range(min=0, max=255)),
+                        vol.Required("hour"): _HOUR,
+                        vol.Required("minute"): _MINUTE,
+                        vol.Required("quantity_ml"): _QTY_ML,
                     }
                 )
             ],
         ),
     }
 )
+
+_SET_SLOT_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Required("channel"): _CHANNEL,
+        # 1-based across the visible (non-empty) entries of the schedule.
+        # Slot 1 = the entry shown first in the text entity. Slots beyond
+        # the current count append as a new entry (provided qty > 0).
+        vol.Required("slot"): _SLOT,
+        vol.Required("hour"): _HOUR,
+        vol.Required("minute"): _MINUTE,
+        vol.Required("quantity_ml"): _QTY_ML,
+    }
+)
+
+_DELETE_SLOT_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Required("channel"): _CHANNEL,
+        vol.Required("slot"): _SLOT,
+    }
+)
+
+
+def _find_doser(hass: HomeAssistant, target_id: str):
+    """Look up the MD44Device + config entry for a given Gizwits did."""
+    for stored in hass.data.get(DOMAIN, {}).values():
+        if stored.get("device_id") == target_id and isinstance(
+            stored.get("device"), MD44Device
+        ):
+            return stored["device"], stored.get("entry")
+    return None, None
+
+
+def _ml_to_raw(quantity_ml: float, entry) -> int:
+    """Convert the real-mL value the user passed into the raw byte the
+    firmware stores. Applies the 10x precision toggle if it's on for
+    this entry."""
+    factor = cal_factor(entry.options) if entry is not None else 1
+    raw = int(round(float(quantity_ml) * factor))
+    return max(0, min(255, raw))
 
 
 async def _async_register_md44_services(hass: HomeAssistant) -> None:
@@ -134,26 +190,92 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
     async def _handle_set_schedule(call: ServiceCall) -> None:
         target_id = call.data["device_id"]
         channel = int(call.data["channel"])
+        device, entry = _find_doser(hass, target_id)
+        if device is None:
+            _LOGGER.error("set_schedule: no MD-4.4 found with device_id %s", target_id)
+            return
         entries = [
-            ScheduleEntry(hour=e["hour"], minute=e["minute"], quantity=e["quantity_ml"])
+            ScheduleEntry(
+                hour=e["hour"],
+                minute=e["minute"],
+                quantity=_ml_to_raw(e["quantity_ml"], entry),
+            )
             for e in call.data["entries"]
         ]
-        # Find the matching MD44Device by device_id (matches the unique_id we
-        # set during config flow).
-        for stored in hass.data.get(DOMAIN, {}).values():
-            if stored.get("device_id") == target_id and isinstance(
-                stored.get("device"), MD44Device
-            ):
-                device: MD44Device = stored["device"]
-                await device.set_schedule(channel - 1, entries)
+        await device.set_schedule(channel - 1, entries)
+
+    async def _handle_set_slot(call: ServiceCall) -> None:
+        target_id = call.data["device_id"]
+        channel = int(call.data["channel"])
+        slot_idx = int(call.data["slot"]) - 1
+        hour = int(call.data["hour"])
+        minute = int(call.data["minute"])
+        device, entry = _find_doser(hass, target_id)
+        if device is None:
+            _LOGGER.error("set_schedule_slot: no MD-4.4 found with device_id %s", target_id)
+            return
+        raw_qty = _ml_to_raw(call.data["quantity_ml"], entry)
+        # Read latest so we don't overwrite a parallel change.
+        try:
+            await device.update()
+        except MD44Error as err:
+            _LOGGER.error("set_schedule_slot: failed to read current state: %s", err)
+            return
+        entries = list(device.state.schedules[channel - 1])
+        new_entry = ScheduleEntry(hour=hour, minute=minute, quantity=raw_qty)
+        if slot_idx < len(entries):
+            if raw_qty == 0:
+                # Treat qty=0 as "delete this slot" so the user has one
+                # service to remember.
+                entries.pop(slot_idx)
+            else:
+                entries[slot_idx] = new_entry
+        elif raw_qty > 0:
+            # Past the end → append. Slot index beyond count is fine; we
+            # just add to the next available position.
+            if len(entries) >= 24:
+                _LOGGER.error(
+                    "set_schedule_slot: channel %d already has the max 24 entries",
+                    channel,
+                )
                 return
-        _LOGGER.error("set_schedule: no MD-4.4 found with device_id %s", target_id)
+            entries.append(new_entry)
+        else:
+            # Slot past the end AND qty=0 → nothing to do.
+            return
+        await device.set_schedule(channel - 1, entries)
+
+    async def _handle_delete_slot(call: ServiceCall) -> None:
+        target_id = call.data["device_id"]
+        channel = int(call.data["channel"])
+        slot_idx = int(call.data["slot"]) - 1
+        device, _entry = _find_doser(hass, target_id)
+        if device is None:
+            _LOGGER.error("delete_schedule_slot: no MD-4.4 found with device_id %s", target_id)
+            return
+        try:
+            await device.update()
+        except MD44Error as err:
+            _LOGGER.error("delete_schedule_slot: failed to read current state: %s", err)
+            return
+        entries = list(device.state.schedules[channel - 1])
+        if slot_idx >= len(entries):
+            _LOGGER.warning(
+                "delete_schedule_slot: channel %d has only %d entries; nothing to delete at slot %d",
+                channel, len(entries), slot_idx + 1,
+            )
+            return
+        entries.pop(slot_idx)
+        await device.set_schedule(channel - 1, entries)
 
     hass.services.async_register(
-        DOMAIN,
-        "set_schedule",
-        _handle_set_schedule,
-        schema=_SET_SCHEDULE_SCHEMA,
+        DOMAIN, "set_schedule", _handle_set_schedule, schema=_SET_SCHEDULE_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, "set_schedule_slot", _handle_set_slot, schema=_SET_SLOT_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, "delete_schedule_slot", _handle_delete_slot, schema=_DELETE_SLOT_SCHEMA,
     )
 
 
