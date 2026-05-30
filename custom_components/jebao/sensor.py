@@ -16,6 +16,7 @@ from .const import (
     MD44_CHANNEL_COUNT,
     MODEL_MD44,
     cal_factor,
+    signal_cal_factor_changed,
     signal_dose_input_changed,
 )
 from .coordinator import JebaoDataUpdateCoordinator
@@ -318,14 +319,20 @@ class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        # The paired Calibration-amount number fires this signal whenever
-        # its value changes. We re-render on the spot rather than waiting
-        # for the next coordinator tick (which doesn't reliably trigger
-        # us anyway because we don't read from coordinator.data).
+        # Re-render immediately on either of: Calibration-amount changing,
+        # or the 10x precision toggle flipping — both change what we'd
+        # display without touching the coordinator's data.
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
                 signal_dose_input_changed(self._entry.entry_id),
+                self.async_write_ha_state,
+            )
+        )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_cal_factor_changed(self._entry.entry_id),
                 self.async_write_ha_state,
             )
         )

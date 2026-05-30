@@ -222,6 +222,11 @@ class MD44DoseInputNumber(JebaoEntity, NumberEntity, RestoreEntity):
     _attr_translation_key = "dose_input"
     _attr_icon = "mdi:beaker-question-outline"
     _attr_native_min_value = 0.0
+    # Both the pump's per-dose schedule slot AND the Jebao app's calibration
+    # field are 1 byte (0..255). With the 10x precision toggle on, that caps
+    # the real-world value the app will accept at 25.5 mL, so we cap the
+    # calculator at the same number — anything higher would compute a value
+    # the app refuses anyway.
     _attr_native_max_value = 25.5
     _attr_native_step = 0.1
     _attr_native_unit_of_measurement = "mL"

@@ -67,3 +67,11 @@ def signal_dose_input_changed(entry_id: str) -> str:
     re-render immediately without waiting for the coordinator's next
     polling cycle."""
     return f"jebao_{entry_id}_dose_input_changed"
+
+
+def signal_cal_factor_changed(entry_id: str) -> str:
+    """Dispatcher signal fired when the 10x precision toggle flips for
+    this entry. Subscribed by every schedule text entity (so they switch
+    between integer / decimal display) and by the Value-to-enter-in-app
+    sensor (so its multiplier visibly updates)."""
+    return f"jebao_{entry_id}_cal_factor_changed"

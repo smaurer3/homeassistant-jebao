@@ -25,10 +25,12 @@ from .const import (
     MD44_CHANNEL_COUNT,
     MODEL_MD44,
     OPT_CAL_FACTOR_10X,
+    signal_cal_factor_changed,
 )
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 from .md44 import MD44Device, MD44Error
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -310,9 +312,13 @@ class MD44CalFactorSwitch(JebaoEntity, SwitchEntity):
         new_options[OPT_CAL_FACTOR_10X] = value
         self.hass.config_entries.async_update_entry(self._entry, options=new_options)
         self.async_write_ha_state()
-        # Other entities re-read on the next coordinator tick. Nudge it so
-        # the dose calculator + schedule text update immediately.
-        await self.coordinator.async_request_refresh()
+        # Tell every dependent entity (schedule text per channel, dose
+        # calculator sensor) to recompute their display right now. The
+        # coordinator refresh on its own doesn't reliably trigger entities
+        # that read from entry.options rather than coordinator.data.
+        async_dispatcher_send(
+            self.hass, signal_cal_factor_changed(self._entry.entry_id)
+        )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self._set(True)

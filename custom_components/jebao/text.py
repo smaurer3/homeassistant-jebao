@@ -24,10 +24,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MD44_CHANNEL_COUNT, MODEL_MD44, cal_factor
+from .const import (
+    DOMAIN,
+    MD44_CHANNEL_COUNT,
+    MODEL_MD44,
+    cal_factor,
+    signal_cal_factor_changed,
+)
 from .coordinator import JebaoDataUpdateCoordinator
 from .entity import JebaoEntity
 from .md44 import MD44Device, MD44Error, ScheduleEntry
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -157,6 +164,19 @@ class MD44ScheduleText(JebaoEntity, TextEntity):
 
     def _factor(self) -> int:
         return cal_factor(self._entry.options)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # When the user flips the 10x precision toggle, re-render so the
+        # schedule string switches between integer and one-decimal-mL
+        # display right away rather than waiting for the next poll.
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_cal_factor_changed(self._entry.entry_id),
+                self.async_write_ha_state,
+            )
+        )
 
     def _coordinator_value(self) -> str:
         state = self.coordinator.data.get("state")
