@@ -108,6 +108,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "dose_input": 1.0,
     }
 
+    # Create the coordinator here, before forwarding to platforms, so all
+    # platforms share one. The old "platform creates it if missing" pattern
+    # was racy: ``async_forward_entry_setups`` runs platforms concurrently,
+    # they all see "no coordinator yet", and each spins up its own — six
+    # coordinators all polling on their own schedule. With one coordinator
+    # built up front, every platform just reads it out of hass.data.
+    from .coordinator import JebaoDataUpdateCoordinator
+
+    scan_interval = entry.options.get("scan_interval")
+    if scan_interval:
+        coordinator = JebaoDataUpdateCoordinator(
+            hass, device, entry, device_id, scan_interval
+        )
+    else:
+        coordinator = JebaoDataUpdateCoordinator(hass, device, entry, device_id)
+    await coordinator.async_config_entry_first_refresh()
+    hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register the doser-specific schedule service. It's a no-op for the

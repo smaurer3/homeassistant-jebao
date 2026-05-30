@@ -125,6 +125,19 @@ class GizwitsWebSocketClient:
         self._stopping = False
         self._task = asyncio.create_task(self._run(), name="jebao-gizwits-ws")
 
+    async def wait_until_connected(self, timeout: float) -> bool:
+        """Block until ``login_ok`` is set or ``timeout`` elapses. Used by
+        the device class so its ``connect`` waits a short moment for the
+        WebSocket to finish its handshake before returning — that way the
+        coordinator's first poll sees ``ws_connected=True`` and picks the
+        5-minute fallback interval right away instead of running one
+        full 30 s polling cycle first."""
+        try:
+            await asyncio.wait_for(self._login_ok.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     async def stop(self) -> None:
         self._stopping = True
         if self._heartbeat_task:

@@ -60,16 +60,9 @@ async def async_setup_entry(
     mac_address = data.get("mac_address")
     firmware_version = data.get("firmware_version")
 
-    if "coordinator" not in data:
-        scan_interval = entry.options.get("scan_interval")
-        if scan_interval:
-            coordinator = JebaoDataUpdateCoordinator(hass, device, entry, device_id, scan_interval)
-        else:
-            coordinator = JebaoDataUpdateCoordinator(hass, device, entry, device_id)
-        await coordinator.async_config_entry_first_refresh()
-        data["coordinator"] = coordinator
-    else:
-        coordinator = data["coordinator"]
+    # Coordinator is built up front in __init__.py so all platforms
+    # share one. Just grab it.
+    coordinator = data["coordinator"]
 
     entities: list[SwitchEntity] = [
         MD44MasterSwitch(coordinator, device_id, model, host, device, mac_address, firmware_version),

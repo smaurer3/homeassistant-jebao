@@ -305,6 +305,12 @@ class MD44Device:
         )
         self._ws.register_device(self.did, self._handle_push)
         await self._ws.start()
+        # Wait briefly for the handshake to complete so the coordinator's
+        # first refresh already sees ws_connected=True and picks the
+        # slower fallback interval. If the handshake takes longer than
+        # this the WS keeps trying in the background and the coordinator
+        # will swap interval on the next poll.
+        await self._ws.wait_until_connected(timeout=5.0)
 
     async def disconnect(self) -> None:
         if self._ws is not None:
