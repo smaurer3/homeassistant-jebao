@@ -53,6 +53,10 @@
         "data": {
           "did": "Doser"
         }
+      },
+      "confirm_discovery": {
+        "title": "Discovered Jebao Pump",
+        "description": "A Jebao pump was found on your network.\n\nModel: {model}\nDevice ID: {device_id}\nIP: {ip}\n\nAdd it to Home Assistant?"
       }
     },
     "error": {
@@ -64,7 +68,8 @@
     },
     "abort": {
       "already_configured": "This device is already configured",
-      "no_devices_on_account": "No dosers were found on this Gizwits account."
+      "no_devices_on_account": "No dosers were found on this Gizwits account.",
+      "not_jebao_device": "Not a registered Jebao device"
     }
   },
   "options": {

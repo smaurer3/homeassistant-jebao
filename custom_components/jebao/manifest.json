@@ -4,10 +4,13 @@
   "codeowners": ["@jrigling"],
   "config_flow": true,
   "dependencies": [],
+  "dhcp": [
+    {"registered_devices": true}
+  ],
   "documentation": "https://github.com/jrigling/homeassistant-jebao",
   "integration_type": "device",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/jrigling/homeassistant-jebao/issues",
-  "requirements": ["python-jebao==0.1.5"],
-  "version": "0.7.1"
+  "requirements": ["python-jebao==0.1.6"],
+  "version": "0.8.0"
 }
