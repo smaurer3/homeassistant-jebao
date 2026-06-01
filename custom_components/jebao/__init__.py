@@ -336,17 +336,14 @@ def _push_schedule_update(
 ) -> None:
     """Mirror the just-written schedule into the coordinator's data so the
     Channel N schedule text entity (and the next-dose / count sensors)
-    re-render immediately rather than waiting for the next poll.
+    re-render immediately rather than waiting for the next push.
 
-    Subtle bit: the slot services call ``device.update()`` first to get
-    fresh state, which **replaces** ``device.state`` with a new object.
-    ``coordinator.data["state"]`` keeps pointing at the *previous* object
-    until the coordinator's own update cycle runs, so just mutating
-    ``device.state`` wasn't enough — the text entity reads from
-    ``coordinator.data``. Using ``async_set_updated_data`` rebinds the
-    coordinator to the current ``device.state`` and notifies all
-    listeners in one shot. The next real coordinator refresh still happens
-    on schedule and will overwrite this once the cloud catches up.
+    The WS subscription may replace ``device.state`` wholesale on each
+    push, while ``coordinator.data["state"]`` keeps pointing at whatever
+    object was current when ``async_set_updated_data`` last fired. Calling
+    ``async_set_updated_data`` here rebinds the coordinator to the now-
+    mutated state and notifies all listeners. The next push from the pump
+    overwrites this once the cloud catches up.
     """
     if device.state is not None:
         device.state.schedules[channel_idx] = list(entries)
@@ -391,11 +388,12 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
             _LOGGER.error("set_schedule_slot: no MD-4.4 found with device_id %s", target_id)
             return
         raw_qty = _ml_to_raw(call.data["quantity_ml"], entry)
-        # Read latest so we don't overwrite a parallel change.
-        try:
-            await device.update()
-        except MD44Error as err:
-            _LOGGER.error("set_schedule_slot: failed to read current state: %s", err)
+        # device.state is kept current by the WS push subscription, so we
+        # don't need a pre-write REST poll here. Just bail if push hasn't
+        # populated state yet (only possible in the brief window before the
+        # first push lands after a reconnect).
+        if device.state is None:
+            _LOGGER.error("set_schedule_slot: device state not ready yet")
             return
         entries = list(device.state.schedules[channel - 1])
         new_entry = ScheduleEntry(hour=hour, minute=minute, quantity=raw_qty)
@@ -430,10 +428,8 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
         if device is None:
             _LOGGER.error("delete_schedule_slot: no MD-4.4 found with device_id %s", target_id)
             return
-        try:
-            await device.update()
-        except MD44Error as err:
-            _LOGGER.error("delete_schedule_slot: failed to read current state: %s", err)
+        if device.state is None:
+            _LOGGER.error("delete_schedule_slot: device state not ready yet")
             return
         entries = list(device.state.schedules[channel - 1])
         if slot_idx >= len(entries):
