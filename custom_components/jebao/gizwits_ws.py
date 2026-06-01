@@ -39,10 +39,13 @@ WS_HOSTS = {
 WS_PORT = 8880
 WS_PATH = "/ws/app/v1"
 
-# Cloud asks us to ping on a configurable interval. We default to 60 s
-# (well inside the broker's typical idle-disconnect window) and react to
-# the actual value the cloud confirms in its ``login_res``.
-DEFAULT_HEARTBEAT = 60
+# Cloud asks us to ping on a configurable interval. We default to 180 s
+# — Gizwits's broker keeps the socket open for ~5 min of idle, so 180 s
+# stays well inside that window while keeping heartbeat traffic light.
+# The cloud confirms the accepted value in its ``login_res``; if it
+# rejected our request and forced a lower value we'd just be pinging
+# faster than necessary, not get disconnected.
+DEFAULT_HEARTBEAT = 180
 
 # Reconnect backoff bounds. The cloud rate-limits aggressive reconnects.
 RECONNECT_MIN = 2.0

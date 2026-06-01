@@ -249,14 +249,20 @@ class MD44ScheduleText(JebaoEntity, TextEntity):
             self.async_write_ha_state()
             return
 
+        ws_on = getattr(self._device, "ws_connected", False)
+        # WS connected: cloud pushes the new schedule back within ~1 s, so
+        # we just wait and check — no REST polls. WS down: poll as before.
+        delays = (2.0, 3.0, 5.0) if ws_on else (5.0, 4.0, 4.0)
+
         async def _verify() -> None:
             try:
-                for delay in (5.0, 4.0, 4.0):
+                for delay in delays:
                     await asyncio.sleep(delay)
-                    try:
-                        await self.coordinator.async_request_refresh()
-                    except Exception:  # pylint: disable=broad-except
-                        continue
+                    if not ws_on:
+                        try:
+                            await self.coordinator.async_request_refresh()
+                        except Exception:  # pylint: disable=broad-except
+                            continue
                     if self._coordinator_value() == target:
                         return
             except asyncio.CancelledError:

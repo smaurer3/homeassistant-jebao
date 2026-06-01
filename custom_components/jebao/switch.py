@@ -34,13 +34,14 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 _LOGGER = logging.getLogger(__name__)
 
-# Pump -> MQTT -> cloud cache propagation usually takes 2-5 seconds. We
-# want to confirm the write without spamming the cloud, so we hold the
-# optimistic pin for a generous initial wait, then refresh and only do a
-# couple of retries before giving up. With the older "poll every 2 s for
-# 20 s" loop, multiple switches toggled in quick succession produced ~1
-# refresh per second between them.
-VERIFY_RETRY_DELAYS = (5.0, 4.0, 4.0)  # total worst case ~13 s + cloud latency
+# Pump -> MQTT -> cloud cache propagation usually takes 2-5 seconds.
+# WS-connected path: the cloud pushes the new state back to us within
+# ~1 s of the write completing, so we don't need to poll at all — we
+# just wait short intervals and check whether the push has landed.
+# WS-down path: keep the old REST-poll behaviour as a fallback so users
+# whose socket is wedged still see a confirmed value within ~15 s.
+VERIFY_RETRY_DELAYS_PUSH = (2.0, 3.0, 5.0)  # WS connected: no REST hits, just waits
+VERIFY_RETRY_DELAYS_POLL = (5.0, 4.0, 4.0)  # WS down: 3 REST refreshes
 
 
 async def async_setup_entry(
@@ -143,21 +144,26 @@ class _MD44SwitchBase(JebaoEntity, SwitchEntity):
             self._clear_optimistic()
             raise err
 
+        ws_on = getattr(self._device, "ws_connected", False)
+        delays = VERIFY_RETRY_DELAYS_PUSH if ws_on else VERIFY_RETRY_DELAYS_POLL
+
         async def _verify() -> None:
             try:
-                for delay in VERIFY_RETRY_DELAYS:
+                for delay in delays:
                     await asyncio.sleep(delay)
-                    try:
-                        await self.coordinator.async_request_refresh()
-                    except Exception:  # pylint: disable=broad-except
-                        # One failed refresh shouldn't abandon the pin.
-                        continue
+                    # WS path: the s2c_noti push updates coordinator.data
+                    # on its own — no REST round-trip needed, just check.
+                    if not ws_on:
+                        try:
+                            await self.coordinator.async_request_refresh()
+                        except Exception:  # pylint: disable=broad-except
+                            continue
                     if self._coordinator_value() == target:
                         return
                 _LOGGER.debug(
                     "Verify gave up after %.0fs; cloud still doesn't reflect "
                     "the write. Releasing optimistic pin.",
-                    sum(VERIFY_RETRY_DELAYS),
+                    sum(delays),
                 )
             except asyncio.CancelledError:
                 # A newer write took over — let it own the pin.
